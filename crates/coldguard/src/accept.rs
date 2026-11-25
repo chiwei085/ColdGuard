@@ -809,13 +809,13 @@ fn log_full(t: &Toolchain) -> Result {
     n.run(5)?;
     n.wait_status("VAX-01", "fridge", "stored", "ok")?;
     n.lab.hub.reject.store(false, Ordering::Relaxed);
-    n.until("backlog confirmed", 600, |n| {
+    let took = n.until("backlog confirmed", 600, |n| {
         n.lab.fleet().inventory.backlog == 0
     })?;
     n.until("log alarm cleared", 5, |n| !n.alarm(INVENTORY, "log_full"))?;
     n.expect(INVENTORY, "checkout", "VAX-01", "", "ok")?;
     Ok(format!(
-        "refused with {held} unconfirmed records, recovered after confirmation"
+        "refused with {held} unconfirmed records, all confirmed in {took} s"
     ))
 }
 

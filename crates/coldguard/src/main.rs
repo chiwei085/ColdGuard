@@ -1,4 +1,5 @@
 mod accept;
+mod assets;
 mod board;
 mod cosim;
 mod devices;
@@ -41,6 +42,8 @@ enum Command {
     },
     /// Install pinned tools into .tools, then run doctor.
     Setup,
+    /// Rebuild the clinic model with Blender 4.0.
+    Assets,
     /// Run a command with the project environment.
     Exec {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
@@ -174,6 +177,7 @@ fn run() -> Result<bool, Box<dyn Error>> {
             setup::run(&t)?;
             check(&t, false)
         }
+        Command::Assets => assets::run(&t).map(|()| true),
         Command::Demo {
             scenario,
             headless,

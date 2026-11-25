@@ -52,10 +52,9 @@ static bool send(const char *kind, const char *type, uint32_t boot, uint32_t seq
     }
     char name[64];
     topic(name, sizeof name, node_names[self], kind);
-    bool durable = strcmp(kind, "event") == 0;
-    /* Events wait in flash, so the client must not hold the caller. */
-    int id = durable ? esp_mqtt_client_enqueue(client, name, text, n, 1, 0, true)
-                     : esp_mqtt_client_publish(client, name, text, n, 0, 0);
+    int qos = strcmp(kind, "event") == 0;
+    /* Queued messages leave one per client loop, which starves the backlog. */
+    int id = esp_mqtt_client_publish(client, name, text, n, qos, 0);
     return id >= 0;
 }
 

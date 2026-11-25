@@ -448,7 +448,7 @@ impl Doctor<'_> {
             "RUSTUP_TOOLCHAIN",
             ok_or(good, Status::Warn),
             rust.unwrap_or_else(|| "Not set".into()),
-            Some(format!("Overrides the pinned version. Use cargo +{pinned}")),
+            Some(format!("Overrides the pinned {pinned}. Unset it, or reopen the shell so mise reads mise.toml")),
         );
         let vars: Vec<_> = ["IDF_PATH", "IDF_TOOLS_PATH", "IDF_PYTHON_ENV_PATH"]
             .into_iter()

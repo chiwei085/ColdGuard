@@ -27,7 +27,7 @@ cargo run -- setup                 # 安裝工具、建置 smoke 韌體，再執
 cargo run -- exec idf.py --version # 在專案環境中執行指令
 ```
 
-若 shell 設定了 `RUSTUP_TOOLCHAIN`（例如 mise），它會蓋過釘選版本，請改用 `cargo +1.100.0`。
+使用 mise 的人也直接執行 `cargo run`：專案的 `mise.toml` 會讓 mise 採用 `rust-toolchain.toml` 的版本。
 
 ## 模擬
 
@@ -44,9 +44,10 @@ cargo test                             # B3 虛擬裝置與主機端測試
 場景模型由 Blender 4.0 產生，修改 `crates/viewer/blender/clinic.py` 後重建 `clinic.glb`：
 
 ```sh
-uv pip install --python /usr/bin/python3.12 --target .tools/blender-py numpy==1.26.4
-PYTHONPATH=.tools/blender-py blender -b --factory-startup --python-use-system-env -P crates/viewer/blender/clinic.py
+cargo run -- assets
 ```
+
+此命令會依 `uv.lock` 自動同步模型產生器的 Python 依賴，再以 headless Blender 重建模型。
 
 ## 文件
 

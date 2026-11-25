@@ -5,3 +5,4 @@
 /firmware/*/managed_components/
 /firmware/*/sdkconfig
 /firmware/*/sdkconfig.old
+/crates/viewer/blender/.venv/

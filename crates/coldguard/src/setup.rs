@@ -1,6 +1,6 @@
 //! Idempotent installation into .tools.
 
-use crate::toolchain::{Toolchain, check_venv, find_in, user_path};
+use crate::toolchain::{Toolchain, find_in, user_path};
 use std::{error::Error, fs, path::Path, process::Command};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -87,15 +87,6 @@ fn python(t: &Toolchain) -> Result {
             .current_dir(t.tools());
         c
     };
-    let venv = t.venv();
-    let current = fs::read_to_string(venv.join("pyvenv.cfg"))
-        .map_err(|e| e.to_string())
-        .and_then(|cfg| check_venv(&cfg, &want.version));
-    if current.is_err() || !venv.join("bin/python").exists() {
-        let args = ["venv", "--clear", "--managed-python", "--python"];
-        check(uv().args(args).arg(&want.version).arg(&venv))?;
-    }
-
     let minor =
         t.m.esp_idf
             .version
@@ -112,14 +103,19 @@ fn python(t: &Toolchain) -> Result {
             &constraints,
         )?;
     }
-    let requirements = t.idf().join("tools/requirements/requirements.core.txt");
+    // idf.py checks the constraints. uv.lock holds the versions.
     check(
-        uv().args(["pip", "install", "--quiet", "--python"])
-            .arg(venv.join("bin/python"))
-            .arg("-r")
-            .arg(requirements)
-            .arg("-c")
-            .arg(constraints),
+        uv().env("UV_PROJECT_ENVIRONMENT", t.venv())
+            .args([
+                "sync",
+                "--locked",
+                "--quiet",
+                "--managed-python",
+                "--python",
+            ])
+            .arg(&want.version)
+            .arg("--project")
+            .arg(t.root.join("firmware/python")),
     )
 }
 
