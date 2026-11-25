@@ -1,0 +1,50 @@
+# Expected environment. See Cargo.toml for the minimum Rust version.
+
+[host]
+os_id = "ubuntu"
+os_version = "24.04"
+arch = "x86_64"
+min_free_disk_gib = 20
+recommended_memory_gib = 8
+
+[env]
+# Child PATH overrides the shell PATH.
+path = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+
+[python]
+# Used only by ESP-IDF build tools. Managed by uv.
+version = "3.13.5"
+min_uv = "0.8.4"
+
+[esp_idf]
+version = "v6.1.1"
+url = "https://github.com/espressif/esp-idf.git"
+commit = "051e4c4eb20346e043cdd47bc388fde75ff8af63"
+targets = ["esp32s3", "esp32c3"]
+
+[esp_emu]
+version = "1.2.0"
+url = "https://github.com/espressif/esp-emulator/releases/download/v1.2.0/esp-emu-1.2.0-x86_64-unknown-linux-gnu.tar.gz"
+archive_sha256 = "560236344fd69dc8d74bc862c79aea01f7a69ac626ae3f54b1b0946bbce078c1"
+binary_sha256 = "fe6b910f921772eed06969b57db02903c5f404a2f2a11dee116a857d4cdc3a2f"
+
+[mqtt]
+port = 1884
+
+[apt]
+# Package = minimum version. Empty means any version.
+bison = ""
+build-essential = ""
+ca-certificates = ""
+ccache = ""
+cmake = "3.22.1"
+curl = ""
+flex = ""
+git = ""
+gperf = ""
+libffi-dev = ""
+libssl-dev = ""
+"libusb-1.0-0" = ""
+mosquitto = "2.0"
+mosquitto-clients = "2.0"
+ninja-build = ""
