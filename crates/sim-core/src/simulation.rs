@@ -25,6 +25,10 @@ impl Simulation {
         &self.world
     }
 
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
+    }
+
     pub fn finished(&self) -> bool {
         self.world.time_ms >= self.scenario.duration_ms
     }

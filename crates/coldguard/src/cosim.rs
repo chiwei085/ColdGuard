@@ -1,28 +1,88 @@
-//! Minimal esp_cosim.v1 clock holder.
-// ponytail: hand-coded messages, use prost when the coordinator needs devices.
+//! Hand-coded esp_cosim.v1 subset. Claims the clock and the board's devices.
 
+use crate::devices::{
+    GAUGE, PIN_BUZZER, PIN_DOOR, PIN_MAINS, PIN_RELAY, PIN_RFID_RX, PIN_RFID_TX, PIN_SCL, PIN_SDA,
+    TMP117,
+};
 use std::{
-    io::{Error, ErrorKind, Read, Result, Write},
+    io::{BufReader, Error, ErrorKind, Read, Result, Write},
     net::{Ipv4Addr, TcpStream},
     time::{Duration, Instant},
 };
 
+const GPIO_LEVEL: u64 = 3;
 const REGISTER: u64 = 4;
 const REGISTER_ACK: u64 = 5;
+const GPIO_DRIVE: u64 = 6;
+const BUS_REQUEST: u64 = 7;
+const BUS_REPLY: u64 = 8;
+const CHIP_RESET: u64 = 9;
+const UART_RX: u64 = 11;
+const EN_DRIVE: u64 = 34;
 const TIME_GRANT: u64 = 40;
 const TIME_WAITING: u64 = 41;
+
+const CLAIM_GPIO: u64 = 1;
+const CLAIM_I2C: u64 = 2;
+const CLAIM_UART: u64 = 4;
+const CLAIM_EN: u64 = 19;
 const CLAIM_TIME: u64 = 23;
 
-const MAX_FRAME: usize = 256 * 1024;
+const BUS_OP_I2C: u64 = 1;
 
-pub struct Clock {
+const MAX_FRAME: usize = 256 * 1024;
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One connection carries everything. Devices answer inside the lockstep loop,
+/// so inputs and replies keep a fixed order.
+pub struct Cosim {
     stream: TcpStream,
+    reader: BufReader<TcpStream>,
 }
 
-impl Clock {
-    /// Register as a clock holder. The chip stops until the first grant.
-    /// Return the stopped time in nanoseconds.
-    pub fn claim(port: u16, deadline: Duration) -> Result<(Self, u64)> {
+pub enum Event {
+    /// Chip time in nanoseconds.
+    Waiting(u64),
+    Reset,
+    Level {
+        pin: u64,
+        level: bool,
+    },
+    Bus {
+        id: u64,
+        address: u64,
+        write: Vec<u8>,
+        read_len: usize,
+    },
+}
+
+impl Cosim {
+    /// Claim the clock and every board device. The chip stops until a grant.
+    pub fn attach(port: u16, deadline: Duration) -> Result<Self> {
+        let gpio = [
+            uint(1, 1 << PIN_DOOR | 1 << PIN_MAINS),
+            uint(2, 1 << PIN_RELAY | 1 << PIN_BUZZER),
+        ]
+        .concat();
+        let i2c = |address| [uint(1, address), uint(2, PIN_SCL), uint(3, PIN_SDA)].concat();
+        let uart = [uint(1, PIN_RFID_TX), uint(2, PIN_RFID_RX)].concat();
+        let mut cosim = Self::register(
+            port,
+            deadline,
+            &[
+                (CLAIM_TIME, vec![]),
+                (CLAIM_GPIO, gpio),
+                (CLAIM_I2C, i2c(TMP117)),
+                (CLAIM_I2C, i2c(GAUGE)),
+                (CLAIM_UART, uart),
+                (CLAIM_EN, vec![]),
+            ],
+        )?;
+        while !matches!(cosim.event()?, Event::Waiting(_)) {}
+        Ok(cosim)
+    }
+
+    fn register(port: u16, deadline: Duration, claims: &[(u64, Vec<u8>)]) -> Result<Self> {
         let end = Instant::now() + deadline;
         let stream = loop {
             match TcpStream::connect((Ipv4Addr::LOCALHOST, port)) {
@@ -32,42 +92,90 @@ impl Clock {
             }
         };
         stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        let mut clock = Clock { stream };
-        let claim = bytes(CLAIM_TIME, &[]);
-        let register = [uint(1, 1), bytes(2, b"coldguard-doctor"), bytes(3, &claim)].concat();
-        clock.send(&bytes(REGISTER, &register))?;
+        stream.set_read_timeout(Some(TIMEOUT))?;
+        let reader = BufReader::new(stream.try_clone()?);
+        let mut cosim = Cosim { stream, reader };
+        let mut register = [uint(1, 1), bytes(2, b"coldguard")].concat();
+        for (field, claim) in claims {
+            register.extend(bytes(3, &bytes(*field, claim)));
+        }
+        cosim.send(&bytes(REGISTER, &register))?;
         let ack = loop {
-            if let Some(ack) = find(&clock.recv()?, REGISTER_ACK)? {
+            if let Some(ack) = find(&cosim.recv()?, REGISTER_ACK)? {
                 break decode(&ack)?;
             }
         };
-        if !matches!(get(&ack, 5), Some(Field::Int(1))) {
-            let reason = match get(&ack, 6) {
-                Some(Field::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
-                _ => "unspecified".into(),
-            };
-            return Err(invalid(&format!(
-                "esp-emu rejected clock registration: {reason}"
-            )));
+        if int(&ack, 5) != 1 {
+            let reason = String::from_utf8_lossy(blob(&ack, 6)).into_owned();
+            return Err(invalid(&format!("esp-emu rejected registration: {reason}")));
         }
-        let now = clock.wait()?;
-        Ok((clock, now))
+        Ok(cosim)
     }
 
-    /// Advance by one grant. Return the stopped time in nanoseconds.
-    pub fn advance(&mut self, ns: u64) -> Result<u64> {
-        self.send(&bytes(TIME_GRANT, &uint(1, ns)))?;
-        self.wait()
+    pub fn power_cycle(&mut self) -> Result<()> {
+        for level in [false, true] {
+            self.enable(level)?;
+            self.grant(1_000_000)?;
+            while !matches!(self.event()?, Event::Waiting(_)) {}
+        }
+        Ok(())
     }
 
-    fn wait(&mut self) -> Result<u64> {
+    pub fn grant(&mut self, ns: u64) -> Result<()> {
+        self.send(&bytes(TIME_GRANT, &uint(1, ns)))
+    }
+
+    pub fn drive(&mut self, pin: u64, level: bool) -> Result<()> {
+        let body = [uint(1, pin), uint(2, level.into())].concat();
+        self.send(&bytes(GPIO_DRIVE, &body))
+    }
+
+    /// Hold the chip in reset while false.
+    pub fn enable(&mut self, level: bool) -> Result<()> {
+        self.send(&bytes(EN_DRIVE, &uint(1, level.into())))
+    }
+
+    pub fn uart(&mut self, data: &[u8]) -> Result<()> {
+        self.send(&bytes(UART_RX, &bytes(1, data)))
+    }
+
+    /// None is a NACK.
+    pub fn reply(&mut self, id: u64, data: Option<&[u8]>) -> Result<()> {
+        let body = [
+            uint(1, id),
+            uint(2, data.is_some().into()),
+            bytes(3, data.unwrap_or_default()),
+            uint(4, BUS_OP_I2C),
+        ]
+        .concat();
+        self.send(&bytes(BUS_REPLY, &body))
+    }
+
+    /// Wait for the next message that matters to a board.
+    pub fn event(&mut self) -> Result<Event> {
         loop {
             let message = decode(&self.recv()?)?;
             if get(&message, TIME_WAITING).is_some() {
-                return Ok(match get(&message, 1) {
-                    Some(Field::Int(ns)) => *ns,
-                    _ => 0,
+                return Ok(Event::Waiting(int(&message, 1)));
+            }
+            if get(&message, CHIP_RESET).is_some() {
+                return Ok(Event::Reset);
+            }
+            if get(&message, GPIO_LEVEL).is_some() {
+                let body = decode(blob(&message, GPIO_LEVEL))?;
+                return Ok(Event::Level {
+                    pin: int(&body, 1),
+                    level: int(&body, 2) == 1,
+                });
+            }
+            if get(&message, BUS_REQUEST).is_some() {
+                let body = decode(blob(&message, BUS_REQUEST))?;
+                let i2c = decode(blob(&body, 2))?;
+                return Ok(Event::Bus {
+                    id: int(&body, 1),
+                    address: int(&i2c, 2),
+                    write: blob(&i2c, 3).to_vec(),
+                    read_len: int(&i2c, 4) as usize,
                 });
             }
         }
@@ -82,18 +190,45 @@ impl Clock {
     /// Return one message without its topic.
     fn recv(&mut self) -> Result<Vec<u8>> {
         let mut len = [0; 4];
-        self.stream.read_exact(&mut len)?;
+        self.reader.read_exact(&mut len)?;
         let len = u32::from_le_bytes(len) as usize;
         if !(2..=MAX_FRAME).contains(&len) {
             return Err(invalid("Invalid cosim frame length"));
         }
         let mut frame = vec![0; len];
-        self.stream.read_exact(&mut frame)?;
+        self.reader.read_exact(&mut frame)?;
         let topic = u16::from_le_bytes([frame[0], frame[1]]) as usize;
         frame
             .get(2 + topic..)
             .map(<[u8]>::to_vec)
             .ok_or_else(|| invalid("Invalid cosim topic length"))
+    }
+}
+
+/// Minimal clock holder for the environment checks.
+pub struct Clock(Cosim);
+
+impl Clock {
+    /// Return the stopped time in nanoseconds.
+    pub fn claim(port: u16, deadline: Duration) -> Result<(Self, u64)> {
+        let mut clock = Clock(Cosim::register(port, deadline, &[(CLAIM_TIME, vec![])])?);
+        let now = clock.wait()?;
+        Ok((clock, now))
+    }
+
+    /// Advance by one grant. Return the stopped time in nanoseconds.
+    pub fn advance(&mut self, ns: u64) -> Result<u64> {
+        self.0.grant(ns)?;
+        self.wait()
+    }
+
+    fn wait(&mut self) -> Result<u64> {
+        loop {
+            let message = decode(&self.0.recv()?)?;
+            if get(&message, TIME_WAITING).is_some() {
+                return Ok(int(&message, 1));
+            }
+        }
     }
 }
 
@@ -170,6 +305,20 @@ fn decode(mut buf: &[u8]) -> Result<Vec<(u64, Field)>> {
 
 fn get(message: &[(u64, Field)], field: u64) -> Option<&Field> {
     message.iter().find(|(n, _)| *n == field).map(|(_, v)| v)
+}
+
+fn int(message: &[(u64, Field)], field: u64) -> u64 {
+    match get(message, field) {
+        Some(Field::Int(n)) => *n,
+        _ => 0,
+    }
+}
+
+fn blob(message: &[(u64, Field)], field: u64) -> &[u8] {
+    match get(message, field) {
+        Some(Field::Bytes(b)) => b,
+        _ => &[],
+    }
 }
 
 fn find(message: &[u8], field: u64) -> Result<Option<Vec<u8>>> {

@@ -1,5 +1,6 @@
 //! Real-time simulation server for viewers.
 
+use crate::{lab::Lab, toolchain::Toolchain};
 use sim_core::{Control, Frame, LIVE_PORT, STEP_MS, Scenario, Simulation};
 use std::{
     error::Error,
@@ -14,11 +15,21 @@ const FRAME: Duration = Duration::from_millis(33);
 const MAX_SPEED: f64 = 600.0;
 const MAX_LINE: u64 = 4096;
 
-/// Serve until stop returns true.
-pub fn serve(scenario: Scenario, mut stop: impl FnMut() -> bool) -> Result<(), Box<dyn Error>> {
+/// Serve until stop returns true. Physics only without a toolchain.
+pub fn serve(
+    scenario: Scenario,
+    units: Option<&Toolchain>,
+    mut stop: impl FnMut() -> bool,
+) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, LIVE_PORT))
         .map_err(|e| format!("port {LIVE_PORT}: {e}"))?;
     listener.set_nonblocking(true)?;
+    let start = || -> Result<Option<Lab>, String> {
+        let Some(t) = units else { return Ok(None) };
+        let db = t.tools().join("records.sqlite3");
+        Lab::start(t, Some(t.m.mqtt.port), &db).map(Some)
+    };
+    let mut lab = start()?;
     let mut sim = Simulation::new(scenario)?;
     let mut speed = 1.0;
     let mut viewers: Vec<TcpStream> = vec![];
@@ -49,7 +60,12 @@ pub fn serve(scenario: Scenario, mut stop: impl FnMut() -> bool) -> Result<(), B
                 Control::Pause { paused } => sim.paused = paused,
                 Control::Speed { factor } if factor > 0.0 => speed = factor.min(MAX_SPEED),
                 Control::Speed { .. } => {}
-                Control::Reset => sim.reset()?,
+                Control::Reset => {
+                    sim.reset()?;
+                    // The old units must release the broker port first.
+                    drop(lab.take());
+                    lab = start()?;
+                }
             }
         }
         let now = Instant::now();
@@ -62,7 +78,15 @@ pub fn serve(scenario: Scenario, mut stop: impl FnMut() -> bool) -> Result<(), B
             owed_ms + elapsed.as_secs_f64() * 1000.0 * speed
         };
         while owed_ms >= STEP_MS as f64 {
-            sim.step()?;
+            match &mut lab {
+                Some(lab) => lab.step(&mut sim)?,
+                None => sim.step()?,
+            };
+            // Slower than requested. Do not build up debt.
+            if now.elapsed() > FRAME {
+                owed_ms = 0.0;
+                break;
+            }
             owed_ms -= STEP_MS as f64;
         }
         let mut line = serde_json::to_vec(&Frame {
@@ -70,6 +94,7 @@ pub fn serve(scenario: Scenario, mut stop: impl FnMut() -> bool) -> Result<(), B
             finished: sim.finished(),
             speed,
             world: sim.world().clone(),
+            fleet: lab.as_ref().map(Lab::fleet),
         })?;
         line.push(b'\n');
         viewers.retain_mut(|v| v.write_all(&line).is_ok());

@@ -11,12 +11,12 @@ use bevy::{
     text::FontSize,
     ui_widgets::{Activate, Button},
 };
-use sim_core::{Action, Control, Frame, NodeId, Sensor};
+use sim_core::{Action, Control, Frame, NodeId, Report, Sensor};
 
-const PANEL: Color = Color::srgba(0.03, 0.045, 0.06, 0.8);
-const MUTED: Color = Color::srgb(0.6, 0.68, 0.75);
-const WARNING: Color = Color::srgb(1.0, 0.72, 0.3);
-const IDLE: Color = Color::srgb(0.13, 0.18, 0.24);
+pub const PANEL: Color = Color::srgba(0.03, 0.045, 0.06, 0.8);
+pub const MUTED: Color = Color::srgb(0.6, 0.68, 0.75);
+pub const WARNING: Color = Color::srgb(1.0, 0.72, 0.3);
+pub const IDLE: Color = Color::srgb(0.13, 0.18, 0.24);
 const HOVER: Color = Color::srgb(0.2, 0.29, 0.38);
 const ACTIVE: Color = Color::srgb(0.1, 0.42, 0.45);
 const FAULT: Color = Color::srgb(0.6, 0.16, 0.16);
@@ -111,7 +111,8 @@ fn perform(op: Op, f: &Frame, link: &Link) {
         Op::Speed => link.send(&Control::Speed {
             factor: match f.speed {
                 x if x < 10.0 => 10.0,
-                x if x < 60.0 => 60.0,
+                // Firmware cannot run that fast.
+                x if x < 60.0 && f.fleet.is_none() => 60.0,
                 _ => 1.0,
             },
         }),
@@ -119,7 +120,7 @@ fn perform(op: Op, f: &Frame, link: &Link) {
     }
 }
 
-fn label(text: &str, size: f32, color: Color) -> impl Bundle + use<> {
+pub fn label(text: &str, size: f32, color: Color) -> impl Bundle + use<> {
     (
         Text::new(text),
         TextFont {
@@ -291,18 +292,42 @@ fn cards(
             color.0 = if n.powered { Color::WHITE } else { MUTED };
             continue;
         };
-        let reading = t.reading_c().filter(|_| n.powered);
+        let reading = match &f.fleet {
+            Some(fleet) => fleet
+                .report(id.0)
+                .temp_c
+                .filter(|_| fleet.report(id.0).online),
+            None => t.reading_c().filter(|_| n.powered),
+        };
         text.0 = reading.map_or("NO DATA".into(), |c| format!("{c:.1} C"));
         color.0 = temperature_color(reading);
     }
     for (id, mut text, mut layout) in &mut details {
-        text.0 = exceptions(id.0, node(f, id.0)).join("  ");
+        text.0 = match &f.fleet {
+            Some(fleet) => reported(fleet.report(id.0), node(f, id.0)),
+            None => exceptions(id.0, node(f, id.0)),
+        }
+        .join("\n");
         layout.display = if text.0.is_empty() {
             Display::None
         } else {
             Display::Flex
         };
     }
+}
+
+/// What the firmware and the network say.
+fn reported(r: &Report, n: &sim_core::Node) -> Vec<String> {
+    if !r.online {
+        return vec![if n.powered { "offline" } else { "off" }.into()];
+    }
+    let mut list: Vec<_> = r.alarms.iter().map(|a| a.replace('_', " ")).collect();
+    if !n.mains
+        && let Some(s) = r.safe_s.filter(|_| !r.alarms.is_empty())
+    {
+        list.push(format!("safe for {} min", s / 60));
+    }
+    list
 }
 
 fn exceptions(id: NodeId, n: &sim_core::Node) -> Vec<String> {

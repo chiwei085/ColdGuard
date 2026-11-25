@@ -34,25 +34,27 @@
 
 ## 3. 時間同步
 
-依據 esp-emu 的 [esp_cosim.proto](https://github.com/espressif/esp-emulator/blob/main/proto/esp_cosim.proto)，尚待技術驗證確認。
+依據 esp-emu 的 [esp_cosim.proto](https://github.com/espressif/esp-emulator/blob/main/proto/esp_cosim.proto)。
 
 1. coordinator 對每個節點註冊 `TimeClaim`。未發放 `TimeGrant` 時，晶片停止。
 2. 每回合發放 1 ms，等三個節點都回報 `TimeWaiting`，再推進 sim-core。
 3. 暫停即停止發放時間。
-4. grant 是時間增量；晶片重置會讓模擬時間歸零，但剩餘 grant 與世界時間延續，因此以 sim-core 的時間為準。
+4. 每個節點只用一條連線持鐘並回應裝置，coordinator 在等待 `TimeWaiting` 時同步回覆匯流排請求，輸入與回覆因此有固定順序。
+5. esp-emu 在時鐘被接管前會自由執行，因此接管後先以 EN 斷電重啟，再開始計時；重啟後仍留有 1 ms 內的相位差。
+6. grant 是時間增量；晶片重置會讓模擬時間歸零，但剩餘 grant 與世界時間延續，因此以 sim-core 的時間為準。
 
 限制與對策：
 
 | 限制 | 對策 |
 |---|---|
-| [#71](https://github.com/espressif/esp-emulator/issues/71)：持鐘連線收到所有 GPIO 廣播，大 quantum 可能 deadlock | quantum 用 1 ms；時鐘與裝置分開連線；持續讀取 socket |
+| [#71](https://github.com/espressif/esp-emulator/issues/71)：持鐘連線收到所有 GPIO 廣播，大 quantum 可能 deadlock | quantum 用 1 ms；單一連線持續讀取 socket，不在等待時停止讀取 |
 | I²C/SPI 讀取超過 5 秒（真實時間）未回覆，esp-emu 會中止 | 虛擬裝置必須回覆每個讀取請求；模擬故障時回 NACK，不可不回覆 |
 | 網路封包依真實時間到達 | 有網路的場景不保證可重現，以容許範圍驗證 |
 | 快轉會使 MQTT 逾時失真 | 只在離線場景快轉；展示改用加速的熱參數 |
 
 可重現性：
 
-- 單節點、不接網路：以相同輸入重跑，事件序列一致為目標。
+- 單節點、不接網路：以相同輸入重跑，事件順序與內容一致，時間差在 1 ms 內。
 - 三節點加 MQTT：以時間容許範圍驗證。
 
 ## 4. 韌體規則
@@ -61,9 +63,12 @@
 - 使用 queue、mutex、event group、software timer 與 watchdog。
 - 網路中斷時，本地警報與記錄持續運作。
 
+- 節點名稱與 broker 埠寫在 `cfg` 分割區，所有節點使用同一份韌體；埠為 0 時離線執行。
+- 記錄寫入 `log` 分割區，主機寫入 SQLite 後才以 application ACK 確認；鎖定序號與庫存存於 NVS。
+
 ## 5. 固定參數
 
-取自 proposal：
+系統採用下列固定參數：
 
 | 項目 | 值 |
 |---|---|

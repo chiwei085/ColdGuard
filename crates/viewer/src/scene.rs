@@ -1,6 +1,10 @@
 //! Clinic model, lighting and camera.
 
-use crate::{Live, link::Link};
+use crate::{
+    Live,
+    link::Link,
+    stock::{PanelOpen, ScreenImage},
+};
 use bevy::{
     anti_alias::{
         contrast_adaptive_sharpening::ContrastAdaptiveSharpening, taa::TemporalAntiAliasing,
@@ -90,8 +94,12 @@ pub fn temperature_color(reading: Option<f64>) -> Color {
 
 /// Demo staff badge at the inventory reader.
 pub fn scan() -> Action {
+    badge(NodeId::Inventory)
+}
+
+pub fn badge(node: NodeId) -> Action {
     Action::Scan {
-        node: NodeId::Inventory,
+        node,
         uid: "04A1B2C3".into(),
     }
 }
@@ -172,6 +180,11 @@ fn bind(
             ),
             other => {
                 let Some(lamp) = lamp(other) else { continue };
+                if matches!(lamp.kind, LampKind::Screen) {
+                    commands.entity(entity).observe(
+                        |_: On<PointerClick>, mut open: ResMut<PanelOpen>| open.0 = !open.0,
+                    );
+                }
                 own_materials(
                     entity,
                     lamp,
@@ -380,6 +393,7 @@ fn surface(p: Vec3, low: Vec3, high: Vec3) -> Vec3 {
 fn camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         Camera3d::default(),
+        IsDefaultUiCamera,
         Projection::from(PerspectiveProjection {
             fov: 0.6,
             near: 0.05,
@@ -438,12 +452,15 @@ fn hinges(live: Res<Live>, time: Res<Time>, mut hinges: Query<(&mut Hinge, &mut 
 
 fn lamps(
     live: Res<Live>,
+    time: Res<Time>,
+    screen: Res<ScreenImage>,
     lamps: Query<(&Lamp, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for (lamp, handle) in &lamps {
         let color = live.0.as_ref().map_or(Color::BLACK, |frame| {
             let n = node(frame, lamp.node);
+            let report = frame.fleet.as_ref().map(|f| f.report(lamp.node));
             let on = |yes, color| {
                 if yes {
                     color
@@ -453,6 +470,16 @@ fn lamps(
             };
             match lamp.kind {
                 _ if !n.powered => Color::BLACK,
+                // The unit's own alarm blinks.
+                LampKind::Temperature
+                    if report.is_some_and(|r| r.online && !r.alarms.is_empty()) =>
+                {
+                    if time.elapsed_secs() % 0.8 < 0.4 {
+                        Color::srgb(1.0, 0.12, 0.08)
+                    } else {
+                        Color::srgb(0.25, 0.0, 0.0)
+                    }
+                }
                 LampKind::Temperature => {
                     temperature_color(n.thermal.as_ref().and_then(|t| t.reading_c()))
                 }
@@ -461,17 +488,22 @@ fn lamps(
                     Color::srgb(0.1, 0.6, 0.75),
                 ),
                 LampKind::Screen => Color::WHITE,
-                LampKind::Network => on(n.network_up, Color::srgb(0.2, 0.9, 0.4)),
+                LampKind::Network => on(
+                    report.map_or(n.network_up, |r| r.online),
+                    Color::srgb(0.2, 0.9, 0.4),
+                ),
             }
         });
         if let Some(mut material) = materials.get_mut(&handle.0) {
+            if matches!(lamp.kind, LampKind::Screen) {
+                material.base_color = Color::BLACK;
+                material.base_color_texture = None;
+                material.emissive_texture = Some(screen.0.clone());
+                material.emissive = color.to_linear();
+                continue;
+            }
             material.base_color = color;
-            material.emissive = color.to_linear()
-                * if matches!(lamp.kind, LampKind::Screen) {
-                    1.0
-                } else {
-                    4.0
-                };
+            material.emissive = color.to_linear() * 4.0;
         }
     }
 }

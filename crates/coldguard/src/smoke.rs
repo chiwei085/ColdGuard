@@ -19,9 +19,9 @@ const BOOT_MARKER: &str = "COLDGUARD_BOOT_OK";
 const MQTT_MARKER: &str = "COLDGUARD_MQTT_OK";
 const QUANTUM_NS: u64 = 1_000_000;
 // Pin the subnet used by the firmware.
-const NET: &str = "user,net=192.168.4.0/24";
+pub const NET: &str = "user,net=192.168.4.0/24";
 
-struct KillOnDrop(Child);
+pub struct KillOnDrop(Child);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
@@ -33,7 +33,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-fn free_port() -> Result<u16> {
+pub fn free_port() -> Result<u16> {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
@@ -43,8 +43,12 @@ fn free_port() -> Result<u16> {
 fn broker(t: &Toolchain) -> Result<(KillOnDrop, u16)> {
     let program = t.which("mosquitto").ok_or("mosquitto not found")?;
     let port = free_port()?;
+    Ok((run_broker(t.command(&program), port)?, port))
+}
+
+pub fn run_broker(mut command: Command, port: u16) -> Result<KillOnDrop> {
     let mut child = KillOnDrop(
-        t.command(&program)
+        command
             .args(["-p", &port.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -53,7 +57,7 @@ fn broker(t: &Toolchain) -> Result<(KillOnDrop, u16)> {
     );
     for _ in 0..50 {
         if TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok() {
-            return Ok((child, port));
+            return Ok(child);
         }
         if let Ok(Some(s)) = child.0.try_wait() {
             return Err(format!("mosquitto failed to start ({s})"));
@@ -94,11 +98,14 @@ pub fn check_build(t: &Toolchain) -> Result {
             json["git_revision"], json["target"]
         ));
     }
-    let image = modified(&t.smoke_image())?;
-    if newest(&t.smoke_source())? > image {
+    if stale(&t.smoke_source(), &t.smoke_image())? {
         return Err("Smoke firmware is older than its sources".into());
     }
     Ok(())
+}
+
+pub fn stale(source: &Path, image: &Path) -> Result<bool> {
+    Ok(newest(source)? > modified(image)?)
 }
 
 fn modified(path: &Path) -> Result<SystemTime> {
@@ -126,7 +133,7 @@ fn newest(dir: &Path) -> Result<SystemTime> {
     Ok(newest)
 }
 
-struct Emulator {
+pub struct Emulator {
     _child: KillOnDrop,
     output: Arc<Mutex<Vec<u8>>>,
 }
@@ -139,11 +146,17 @@ impl Emulator {
                 return Err(format!("{} does not exist", path.display()));
             }
         }
-        let mut child = t
-            .command(&bin)
+        let mut command = t.command(&bin);
+        command
             .args(["--chip", "esp32s3", "--net", NET, "--firmware"])
             .arg(&image)
-            .args(args)
+            .args(args);
+        Self::spawn(command)
+    }
+
+    pub fn spawn(mut command: Command) -> Result<Self> {
+        let mut child = command
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -162,7 +175,13 @@ impl Emulator {
         })
     }
 
-    fn text(&self) -> String {
+    pub fn tail(&self) -> String {
+        let text = self.text();
+        let last = text.trim().lines().last().unwrap_or("no output");
+        format!("Last output: {last}")
+    }
+
+    pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
     }
 
@@ -178,9 +197,7 @@ impl Emulator {
     }
 
     fn missing(&self, marker: &str) -> String {
-        let text = self.text();
-        let last = text.trim().lines().last().unwrap_or("no output");
-        format!("{marker} not found. Last output: {last}")
+        format!("{marker} not found. {}", self.tail())
     }
 }
 

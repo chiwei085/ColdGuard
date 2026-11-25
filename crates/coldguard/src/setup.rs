@@ -20,7 +20,8 @@ pub fn run(t: &Toolchain) -> Result {
     step("ESP-IDF toolchain", idf_tools(t))?;
     step("esp-emu", esp_emu(t))?;
     step("Cargo dependencies", cargo(t))?;
-    step("Smoke firmware", smoke(t))
+    step("Smoke firmware", smoke(t))?;
+    step("Node firmware", node(t))
 }
 
 fn step(name: &str, result: Result) -> Result {
@@ -168,19 +169,27 @@ fn cargo(t: &Toolchain) -> Result {
 }
 
 fn smoke(t: &Toolchain) -> Result {
-    let build = t.smoke_build();
+    firmware(t, &t.smoke_source(), &t.smoke_image())
+}
+
+pub fn node(t: &Toolchain) -> Result {
+    firmware(t, &t.node_source(), &t.node_image())
+}
+
+fn firmware(t: &Toolchain, source: &Path, image: &Path) -> Result {
+    let build = image.parent().ok_or("image has no directory")?;
     // An existing sdkconfig hides changes to sdkconfig.defaults.
     let _ = fs::remove_file(build.join("sdkconfig"));
     let sdkconfig = format!("SDKCONFIG={}", build.join("sdkconfig").display());
     check(
         t.idf_command("idf.py")?
             .arg("-C")
-            .arg(t.smoke_source())
+            .arg(source)
             .arg("-B")
-            .arg(&build)
+            .arg(build)
             .args(["-D", &sdkconfig, "-D", "IDF_TARGET=esp32s3"])
             .args(["build", "merge-bin", "-o"])
-            .arg(t.smoke_image()),
+            .arg(image),
     )
 }
 

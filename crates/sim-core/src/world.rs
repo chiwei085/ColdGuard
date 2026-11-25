@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 /// Matches the 1 ms coordinator quantum.
 pub const STEP_MS: u64 = 1;
 const STEP_S: f64 = STEP_MS as f64 / 1000.0;
+/// Commands pile up only without firmware.
+const MAX_OUTBOX: usize = 64;
 const STEP_H: f64 = STEP_S / 3600.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,6 +13,18 @@ pub enum NodeId {
     Fridge,
     Carrier,
     Inventory,
+}
+
+impl NodeId {
+    pub const ALL: [Self; 3] = [Self::Fridge, Self::Carrier, Self::Inventory];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Fridge => "fridge",
+            Self::Carrier => "carrier",
+            Self::Inventory => "inventory",
+        }
+    }
 }
 
 /// Engineering defaults. Calibrate here, not in the equations.
@@ -156,6 +170,17 @@ pub enum Action {
         node: NodeId,
         uid: String,
     },
+    /// Operator command for the firmware. No physical effect.
+    Operate {
+        node: NodeId,
+        cmd: String,
+        #[serde(default)]
+        batch: String,
+        #[serde(default)]
+        to: String,
+        #[serde(default)]
+        note: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -193,6 +218,9 @@ pub struct World {
     pub fridge: Node,
     pub carrier: Node,
     pub inventory: Node,
+    /// Operator commands waiting for delivery.
+    #[serde(skip)]
+    pub outbox: Vec<Action>,
     #[serde(skip)]
     config: Config,
 }
@@ -224,8 +252,17 @@ impl World {
             fridge: node(Some(&config.fridge), true),
             carrier: node(Some(&config.carrier), false),
             inventory: node(None, true),
+            outbox: vec![],
             config,
         })
+    }
+
+    pub fn node(&self, id: NodeId) -> &Node {
+        match id {
+            NodeId::Fridge => &self.fridge,
+            NodeId::Carrier => &self.carrier,
+            NodeId::Inventory => &self.inventory,
+        }
     }
 
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
@@ -268,6 +305,12 @@ impl World {
                 let node = self.node_mut(*node);
                 node.last_scan = Some(uid.to_ascii_uppercase());
                 node.scan_count += 1;
+            }
+            Action::Operate { .. } => {
+                if self.outbox.len() >= MAX_OUTBOX {
+                    return Err("too many pending commands".into());
+                }
+                self.outbox.push(action.clone());
             }
         }
         Ok(())

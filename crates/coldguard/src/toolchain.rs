@@ -51,6 +51,14 @@ impl Toolchain {
         self.smoke_build().join("merged.bin")
     }
 
+    pub fn node_source(&self) -> PathBuf {
+        self.root.join("firmware/node")
+    }
+
+    pub fn node_image(&self) -> PathBuf {
+        self.tools().join("node/merged.bin")
+    }
+
     /// Run with an allowlisted environment.
     pub fn plain(&self, program: impl AsRef<OsStr>) -> Command {
         let mut c = Command::new(program);

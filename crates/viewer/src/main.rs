@@ -3,6 +3,7 @@
 mod hud;
 mod link;
 mod scene;
+mod stock;
 
 use bevy::{
     prelude::*,
@@ -39,7 +40,7 @@ fn main() {
     .insert_resource(Link::start())
     .init_resource::<Live>()
     .add_systems(PreUpdate, receive)
-    .add_plugins((scene::plugin, hud::plugin));
+    .add_plugins((scene::plugin, hud::plugin, stock::plugin));
 
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() == Some("--screenshot")

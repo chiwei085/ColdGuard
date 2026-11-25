@@ -1,0 +1,8 @@
+# Name, Type, SubType, Offset, Size
+nvs,    data, nvs,  0x9000,   0x6000
+phy,    data, phy,  0xf000,   0x1000
+app,    app,  factory, 0x10000, 0x180000
+# Node name and broker, written once per unit.
+cfg,    data, 0x40, 0x190000, 0x1000
+# 4096 records of 256 bytes plus spare sectors.
+log,    data, 0x41, 0x191000, 0x110000

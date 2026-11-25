@@ -1,7 +1,13 @@
+mod accept;
+mod board;
 mod cosim;
+mod devices;
 mod doctor;
+mod hub;
+mod lab;
 mod live;
 mod manifest;
+mod proxy;
 mod setup;
 mod smoke;
 mod toolchain;
@@ -42,6 +48,8 @@ enum Command {
     },
     /// Run a scenario headless. Print one JSON snapshot per line.
     Sim { scenario: PathBuf },
+    /// Accept the firmware in closed loop. All cases by default.
+    Accept { cases: Vec<String> },
     /// Run a scenario in real time with the 3D viewer.
     Demo {
         #[arg(default_value = "scenarios/demo.toml")]
@@ -49,6 +57,9 @@ enum Command {
         /// Serve without opening the viewer.
         #[arg(long)]
         headless: bool,
+        /// Run physics only.
+        #[arg(long)]
+        no_firmware: bool,
         /// Save the view after 8 seconds and exit.
         #[arg(long)]
         screenshot: Option<PathBuf>,
@@ -60,15 +71,28 @@ fn load_scenario(path: &Path) -> Result<Scenario, Box<dyn Error>> {
     Ok(Scenario::parse(&text)?)
 }
 
+/// Rebuild the node firmware when its sources changed.
+fn prepare(t: &Toolchain) -> Result<(), Box<dyn Error>> {
+    if smoke::stale(&t.node_source(), &t.node_image()).unwrap_or(true) {
+        setup::node(t)?;
+    }
+    Ok(())
+}
+
 fn demo(
     t: &Toolchain,
     path: &Path,
     headless: bool,
+    firmware: bool,
     shot: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     let scenario = load_scenario(path)?;
+    if firmware {
+        prepare(t)?;
+    }
+    let units = firmware.then_some(t);
     if headless {
-        return live::serve(scenario, || false);
+        return live::serve(scenario, units, || false);
     }
     // Build first so the server never waits for the compiler.
     let cargo = t.cargo_bin("cargo").ok_or("cargo not found")?;
@@ -84,7 +108,7 @@ fn demo(
         viewer.arg("--screenshot").arg(std::path::absolute(path)?);
     }
     let mut viewer = viewer.spawn()?;
-    let result = live::serve(scenario, || !matches!(viewer.try_wait(), Ok(None)));
+    let result = live::serve(scenario, units, || !matches!(viewer.try_wait(), Ok(None)));
     let _ = viewer.kill();
     let _ = viewer.wait();
     result
@@ -132,8 +156,13 @@ fn run() -> Result<bool, Box<dyn Error>> {
         Command::Demo {
             scenario,
             headless,
+            no_firmware,
             screenshot,
-        } => demo(&t, &scenario, headless, screenshot.as_deref()).map(|()| true),
+        } => demo(&t, &scenario, headless, !no_firmware, screenshot.as_deref()).map(|()| true),
+        Command::Accept { cases } => {
+            prepare(&t)?;
+            Ok(accept::run(&t, &cases)?)
+        }
         Command::Sim { scenario } => sim(&scenario).map(|()| true),
         Command::Exec { command } => {
             // exec returns only on failure.

@@ -1,5 +1,5 @@
 # Two-hour open world for live operation.
-# The relay is scripted until the firmware drives it.
+# The relay events matter only without firmware.
 duration_ms = 7_200_000
 snapshot_ms = 1000
 
@@ -8,6 +8,34 @@ at_ms = 0
 action = "relay"
 node = "fridge"
 on = true
+
+# Opening stock.
+[[event]]
+at_ms = 6_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 7_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 7_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-02"
+
+[[event]]
+at_ms = 7_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-03"
 
 [[event]]
 at_ms = 90_000
