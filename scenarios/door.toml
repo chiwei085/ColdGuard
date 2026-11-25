@@ -1,0 +1,15 @@
+# Door open for 5 minutes without cooling.
+duration_ms = 600_000
+snapshot_ms = 60_000
+
+[[event]]
+at_ms = 60_000
+action = "door"
+node = "fridge"
+open = true
+
+[[event]]
+at_ms = 360_000
+action = "door"
+node = "fridge"
+open = false

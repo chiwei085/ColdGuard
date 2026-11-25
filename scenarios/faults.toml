@@ -1,0 +1,50 @@
+# Every fault type in one replay.
+duration_ms = 600_000
+snapshot_ms = 10_000
+
+[[event]]
+at_ms = 0
+action = "relay"
+node = "fridge"
+on = true
+
+[[event]]
+at_ms = 30_000
+action = "cooling"
+node = "fridge"
+efficiency = 0.0
+
+[[event]]
+at_ms = 60_000
+action = "sensor"
+node = "fridge"
+state = "disconnected"
+
+[[event]]
+at_ms = 90_000
+action = "sensor"
+node = "carrier"
+state = { biased = 1.5 }
+
+[[event]]
+at_ms = 120_000
+action = "network"
+node = "inventory"
+up = false
+
+[[event]]
+at_ms = 150_000
+action = "battery"
+node = "carrier"
+level = 0.001
+
+[[event]]
+at_ms = 180_000
+action = "ambient"
+celsius = 35.0
+
+[[event]]
+at_ms = 210_000
+action = "scan"
+node = "inventory"
+uid = "04a1b2c3"

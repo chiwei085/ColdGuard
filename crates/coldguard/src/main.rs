@@ -1,13 +1,21 @@
 mod cosim;
 mod doctor;
+mod live;
 mod manifest;
 mod setup;
 mod smoke;
 mod toolchain;
 
 use clap::{Parser, Subcommand};
+use sim_core::{Scenario, Simulation};
 use std::{
-    error::Error, ffi::OsString, os::unix::process::CommandExt, path::PathBuf, process::ExitCode,
+    error::Error,
+    ffi::OsString,
+    fs,
+    io::{self, Write},
+    os::unix::process::CommandExt,
+    path::{Path, PathBuf},
+    process::ExitCode,
 };
 use toolchain::Toolchain;
 
@@ -32,6 +40,64 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<OsString>,
     },
+    /// Run a scenario headless. Print one JSON snapshot per line.
+    Sim { scenario: PathBuf },
+    /// Run a scenario in real time with the 3D viewer.
+    Demo {
+        #[arg(default_value = "scenarios/demo.toml")]
+        scenario: PathBuf,
+        /// Serve without opening the viewer.
+        #[arg(long)]
+        headless: bool,
+        /// Save the view after 8 seconds and exit.
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
+    },
+}
+
+fn load_scenario(path: &Path) -> Result<Scenario, Box<dyn Error>> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Scenario::parse(&text)?)
+}
+
+fn demo(
+    t: &Toolchain,
+    path: &Path,
+    headless: bool,
+    shot: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    let scenario = load_scenario(path)?;
+    if headless {
+        return live::serve(scenario, || false);
+    }
+    // Build first so the server never waits for the compiler.
+    let cargo = t.cargo_bin("cargo").ok_or("cargo not found")?;
+    let status = std::process::Command::new(cargo)
+        .args(["build", "--package", "viewer"])
+        .current_dir(&t.root)
+        .status()?;
+    if !status.success() {
+        return Err("viewer build failed".into());
+    }
+    let mut viewer = std::process::Command::new(t.root.join("target/debug/viewer"));
+    if let Some(path) = shot {
+        viewer.arg("--screenshot").arg(std::path::absolute(path)?);
+    }
+    let mut viewer = viewer.spawn()?;
+    let result = live::serve(scenario, || !matches!(viewer.try_wait(), Ok(None)));
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+    result
+}
+
+fn sim(path: &Path) -> Result<(), Box<dyn Error>> {
+    let scenario = load_scenario(path)?;
+    let mut out = io::stdout().lock();
+    Simulation::new(scenario)?.run(|world| {
+        serde_json::to_writer(&mut out, world)?;
+        writeln!(out)?;
+        Ok::<(), Box<dyn Error>>(())
+    })
 }
 
 fn find_root() -> Result<PathBuf, Box<dyn Error>> {
@@ -63,6 +129,12 @@ fn run() -> Result<bool, Box<dyn Error>> {
             setup::run(&t)?;
             check(&t, false)
         }
+        Command::Demo {
+            scenario,
+            headless,
+            screenshot,
+        } => demo(&t, &scenario, headless, screenshot.as_deref()).map(|()| true),
+        Command::Sim { scenario } => sim(&scenario).map(|()| true),
         Command::Exec { command } => {
             // exec returns only on failure.
             let e = t.idf_command(&command[0])?.args(&command[1..]).exec();

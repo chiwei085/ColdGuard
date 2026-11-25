@@ -29,6 +29,14 @@ cargo run -- exec idf.py --version # 在專案環境中執行指令
 
 若 shell 設定了 `RUSTUP_TOOLCHAIN`（例如 mise），它會蓋過釘選版本，請改用 `cargo +1.100.0`。
 
+## 模擬
+
+```sh
+cargo run -- demo                      # 3D 診所即時操作；點擊門、箱蓋、讀卡機，右鍵拖曳與滾輪控制鏡頭
+cargo run -- sim scenarios/outage.toml # headless 執行劇本，每行輸出一筆 JSON 快照
+cargo test -p sim-core                 # B1、B2 驗收
+```
+
 ## 文件
 
 - [架構](docs/architecture.md)：責任邊界、時間同步、介面規則

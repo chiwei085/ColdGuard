@@ -1,0 +1,15 @@
+# Mains loss while the relay stays on.
+duration_ms = 1_800_000
+snapshot_ms = 60_000
+
+[[event]]
+at_ms = 0
+action = "relay"
+node = "fridge"
+on = true
+
+[[event]]
+at_ms = 120_000
+action = "mains"
+node = "fridge"
+on = false

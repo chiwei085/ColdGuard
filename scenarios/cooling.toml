@@ -1,0 +1,15 @@
+# Warm fridge with the relay held on for 10 minutes.
+duration_ms = 900_000
+snapshot_ms = 60_000
+
+[[event]]
+at_ms = 0
+action = "relay"
+node = "fridge"
+on = true
+
+[[event]]
+at_ms = 600_000
+action = "relay"
+node = "fridge"
+on = false

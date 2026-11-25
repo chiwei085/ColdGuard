@@ -1,0 +1,16 @@
+# Two-hour open world for live operation.
+# The relay is scripted until the firmware drives it.
+duration_ms = 7_200_000
+snapshot_ms = 1000
+
+[[event]]
+at_ms = 0
+action = "relay"
+node = "fridge"
+on = true
+
+[[event]]
+at_ms = 90_000
+action = "relay"
+node = "fridge"
+on = false
