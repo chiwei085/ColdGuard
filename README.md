@@ -17,6 +17,18 @@
 | 3D 呈現 | Rust、Bevy |
 | 訊息代理 | Mosquitto |
 
+## 環境
+
+需要 [rustup](https://rustup.rs) 與 [uv](https://docs.astral.sh/uv/)。版本釘選於 `toolchain.toml` 與 `rust-toolchain.toml`，其餘工具安裝在 `.tools/`。
+
+```sh
+cargo run -- doctor                # 檢查環境；缺少系統套件時會列出 apt 指令
+cargo run -- setup                 # 安裝工具、建置 smoke 韌體，再執行 doctor
+cargo run -- exec idf.py --version # 在專案環境中執行指令
+```
+
+若 shell 設定了 `RUSTUP_TOOLCHAIN`（例如 mise），它會蓋過釘選版本，請改用 `cargo +1.100.0`。
+
 ## 文件
 
 - [架構](docs/architecture.md)：責任邊界、時間同步、介面規則
