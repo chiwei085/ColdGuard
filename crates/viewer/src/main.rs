@@ -21,14 +21,19 @@ struct ScreenshotPath(String);
 fn main() {
     let mut app = App::new();
     app.add_plugins((
-        DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "ColdGuard".into(),
-                resolution: (1600, 900).into(),
+        DefaultPlugins
+            .set(AssetPlugin {
+                file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets").into(),
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "ColdGuard".into(),
+                    resolution: (1600, 900).into(),
+                    ..default()
+                }),
                 ..default()
             }),
-            ..default()
-        }),
         MeshPickingPlugin,
     ))
     .insert_resource(Link::start())

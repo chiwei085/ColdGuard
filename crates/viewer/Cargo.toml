@@ -7,6 +7,6 @@ publish = false
 
 [dependencies]
 # Default platform features need udev and Wayland headers.
-bevy = { version = "0.20", default-features = false, features = ["std", "bevy_winit", "default_font", "multi_threaded", "x11", "default_app", "3d_bevy_render", "ui_api", "ui_bevy_render", "bevy_ui_widgets", "picking"] }
+bevy = { version = "0.20", default-features = false, features = ["std", "bevy_winit", "default_font", "multi_threaded", "x11", "default_app", "3d_bevy_render", "ui_api", "ui_bevy_render", "bevy_ui_widgets", "picking", "png", "area_light_luts", "experimental_pbr_pcss"] }
 serde_json = "1"
 sim-core = { path = "../sim-core" }

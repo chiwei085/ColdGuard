@@ -32,9 +32,16 @@ cargo run -- exec idf.py --version # 在專案環境中執行指令
 ## 模擬
 
 ```sh
-cargo run -- demo                      # 3D 診所即時操作；點擊門、箱蓋、讀卡機，右鍵拖曳與滾輪控制鏡頭
+cargo run -- demo                      # 3D 診所即時操作；點擊門、箱蓋、讀卡機（或按 1、2、3），4 切換 relay，5–8 注入故障，右鍵拖曳與滾輪控制鏡頭
 cargo run -- sim scenarios/outage.toml # headless 執行劇本，每行輸出一筆 JSON 快照
 cargo test -p sim-core                 # B1、B2 驗收
+```
+
+場景模型由 Blender 4.0 產生，修改 `crates/viewer/blender/clinic.py` 後重建 `clinic.glb`：
+
+```sh
+uv pip install --python /usr/bin/python3.12 --target .tools/blender-py numpy==1.26.4
+PYTHONPATH=.tools/blender-py blender -b --factory-startup --python-use-system-env -P crates/viewer/blender/clinic.py
 ```
 
 ## 文件

@@ -1,4 +1,4 @@
-//! Status cards, history chart and operations.
+//! Node readings and operations. Exceptions show only while they last.
 
 use crate::{
     Live,
@@ -12,10 +12,10 @@ use bevy::{
     ui_widgets::{Activate, Button},
 };
 use sim_core::{Action, Control, Frame, NodeId, Sensor};
-use std::collections::VecDeque;
 
-const PANEL: Color = Color::srgba(0.04, 0.06, 0.09, 0.86);
+const PANEL: Color = Color::srgba(0.03, 0.045, 0.06, 0.8);
 const MUTED: Color = Color::srgb(0.6, 0.68, 0.75);
+const WARNING: Color = Color::srgb(1.0, 0.72, 0.3);
 const IDLE: Color = Color::srgb(0.13, 0.18, 0.24);
 const HOVER: Color = Color::srgb(0.2, 0.29, 0.38);
 const ACTIVE: Color = Color::srgb(0.1, 0.42, 0.45);
@@ -27,23 +27,9 @@ const NODES: [(NodeId, &str); 3] = [
     (NodeId::Inventory, "INVENTORY"),
 ];
 
-const BARS: usize = 150;
-/// Simulated time between chart samples.
-const SAMPLE_MS: u64 = 10_000;
-const CHART_MIN: f64 = -2.0;
-const CHART_MAX: f64 = 14.0;
-const CHART_HEIGHT: f32 = 110.0;
-
 pub fn plugin(app: &mut App) {
-    app.init_resource::<History>()
-        .add_systems(Startup, build)
-        .add_systems(Update, (cards, clock, buttons, record, chart, keys).chain());
-}
-
-#[derive(Resource, Default)]
-struct History {
-    last_ms: u64,
-    samples: VecDeque<Option<f64>>,
+    app.add_systems(Startup, build)
+        .add_systems(Update, (cards, clock, speed, buttons, keys).chain());
 }
 
 #[derive(Component)]
@@ -56,7 +42,7 @@ struct Details(NodeId);
 struct Clock;
 
 #[derive(Component)]
-struct Bar(usize);
+struct SpeedLabel;
 
 #[derive(Component, Clone, Copy)]
 enum Op {
@@ -68,7 +54,8 @@ enum Op {
     Network,
     Scan,
     Pause,
-    Speed(f64),
+    /// Steps through 1x, 10x and 60x.
+    Speed,
     Reset,
 }
 
@@ -90,8 +77,7 @@ fn state(op: Op, f: &Frame) -> (bool, bool) {
         ),
         Op::Network => (!f.world.inventory.network_up, true),
         Op::Pause => (f.paused, false),
-        Op::Speed(x) => (f.speed == x, false),
-        Op::Scan | Op::Reset => (false, false),
+        Op::Scan | Op::Speed | Op::Reset => (false, false),
     }
 }
 
@@ -122,7 +108,13 @@ fn perform(op: Op, f: &Frame, link: &Link) {
         }),
         Op::Scan => link.act(scan()),
         Op::Pause => link.send(&Control::Pause { paused: !on }),
-        Op::Speed(factor) => link.send(&Control::Speed { factor }),
+        Op::Speed => link.send(&Control::Speed {
+            factor: match f.speed {
+                x if x < 10.0 => 10.0,
+                x if x < 60.0 => 60.0,
+                _ => 1.0,
+            },
+        }),
         Op::Reset => link.send(&Control::Reset),
     }
 }
@@ -155,124 +147,109 @@ fn build(mut commands: Commands) {
         .spawn(panel(Node {
             left: px(16),
             top: px(16),
-            width: px(270),
+            width: px(190),
             flex_direction: FlexDirection::Column,
             row_gap: px(6),
             ..default()
         }))
         .with_children(|p| {
-            p.spawn(label("COLDGUARD", 24.0, Color::WHITE));
-            p.spawn((Clock, label("Connecting", 15.0, MUTED)));
             for (id, name) in NODES {
                 p.spawn((
                     Node {
-                        margin: UiRect::top(px(10)),
                         justify_content: JustifyContent::SpaceBetween,
                         align_items: AlignItems::Center,
                         ..default()
                     },
                     children![
-                        label(name, 16.0, MUTED),
-                        (Reading(id), label("--", 26.0, Color::WHITE)),
+                        label(name, 14.0, MUTED),
+                        (Reading(id), label("--", 18.0, Color::WHITE)),
                     ],
                 ));
-                p.spawn((Details(id), label("", 14.0, MUTED)));
-            }
-        });
-
-    commands
-        .spawn(panel(Node {
-            right: px(16),
-            top: px(16),
-            width: px(BARS as f32 * 2.0 + 28.0),
-            flex_direction: FlexDirection::Column,
-            row_gap: px(8),
-            ..default()
-        }))
-        .with_children(|p| {
-            p.spawn(label("Fridge probe, last 25 simulated min", 14.0, MUTED));
-            p.spawn(Node {
-                height: px(CHART_HEIGHT),
-                ..default()
-            })
-            .with_children(|c| {
-                // Safe band from 2 to 8 C.
-                let y = |t: f64| ((t - CHART_MIN) / (CHART_MAX - CHART_MIN)) as f32 * CHART_HEIGHT;
-                c.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        bottom: px(y(2.0)),
-                        height: px(y(8.0) - y(2.0)),
-                        width: px(BARS as f32 * 2.0),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.1, 0.7, 0.4, 0.14)),
-                ));
-                for i in 0..BARS {
-                    c.spawn((
-                        Bar(i),
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: px(i as f32 * 2.0),
-                            width: px(2),
-                            height: px(3),
-                            ..default()
-                        },
-                        BackgroundColor(Color::NONE),
-                    ));
-                }
-            });
-            p.spawn(label("-2 to 14 C, band 2 to 8 C", 12.0, MUTED));
-        });
-
-    commands
-        .spawn(panel(Node {
-            left: px(16),
-            right: px(16),
-            bottom: px(16),
-            flex_wrap: FlexWrap::Wrap,
-            column_gap: px(8),
-            row_gap: px(8),
-            justify_content: JustifyContent::Center,
-            ..default()
-        }))
-        .with_children(|p| {
-            for (op, text) in [
-                (Op::Door(NodeId::Fridge), "Door [1]"),
-                (Op::Door(NodeId::Carrier), "Lid [2]"),
-                (Op::Scan, "Scan [3]"),
-                (Op::Relay, "Relay [4]"),
-                (Op::Mains, "Mains [5]"),
-                (Op::CoolingFault, "Cooling [6]"),
-                (Op::SensorFault, "Sensor [7]"),
-                (Op::Network, "Network [8]"),
-                (Op::Pause, "Pause [Space]"),
-                (Op::Speed(1.0), "1x"),
-                (Op::Speed(10.0), "10x"),
-                (Op::Speed(60.0), "60x"),
-                (Op::Reset, "Reset [R]"),
-            ] {
                 p.spawn((
-                    op,
-                    Button,
-                    Hovered::default(),
+                    Details(id),
                     Node {
-                        padding: UiRect::axes(px(12), px(8)),
-                        border_radius: BorderRadius::all(px(6)),
+                        display: Display::None,
                         ..default()
                     },
-                    BackgroundColor(IDLE),
-                    children![label(text, 14.0, Color::WHITE)],
-                ))
-                .observe(
-                    move |_: On<Activate>, live: Res<Live>, link: Res<Link>| {
-                        if let Some(f) = &live.0 {
-                            perform(op, f, &link);
-                        }
-                    },
-                );
+                    label("", 13.0, WARNING),
+                ));
             }
         });
+
+    // Doors, lid and reader are operated in the scene.
+    let faults = [
+        (Op::Mains, "Mains"),
+        (Op::CoolingFault, "Cooling"),
+        (Op::SensorFault, "Sensor"),
+        (Op::Network, "Network"),
+    ];
+    let time = [
+        (Op::Pause, "Pause"),
+        (Op::Speed, "1x"),
+        (Op::Reset, "Reset"),
+    ];
+    let bar = |node: Node| {
+        panel(Node {
+            bottom: px(16),
+            padding: UiRect::all(px(6)),
+            column_gap: px(6),
+            align_items: AlignItems::Center,
+            ..node
+        })
+    };
+    commands
+        .spawn(bar(Node {
+            left: px(16),
+            ..default()
+        }))
+        .with_children(|p| {
+            for (op, text) in faults {
+                button(p, op, text);
+            }
+        });
+    commands
+        .spawn(bar(Node {
+            right: px(16),
+            ..default()
+        }))
+        .with_children(|p| {
+            p.spawn((
+                Node {
+                    margin: UiRect::horizontal(px(8)),
+                    ..default()
+                },
+                Clock,
+                label("", 14.0, MUTED),
+            ));
+            for (op, text) in time {
+                button(p, op, text);
+            }
+        });
+}
+
+fn button(parent: &mut ChildSpawnerCommands, op: Op, text: &str) {
+    let mut entity = parent.spawn((
+        op,
+        Button,
+        Hovered::default(),
+        Node {
+            padding: UiRect::axes(px(10), px(6)),
+            border_radius: BorderRadius::all(px(6)),
+            ..default()
+        },
+        BackgroundColor(IDLE),
+    ));
+    entity.with_children(|p| {
+        let mut text = p.spawn(label(text, 13.0, Color::WHITE));
+        if matches!(op, Op::Speed) {
+            text.insert(SpeedLabel);
+        }
+    });
+    entity.observe(move |_: On<Activate>, live: Res<Live>, link: Res<Link>| {
+        if let Some(f) = &live.0 {
+            perform(op, f, &link);
+        }
+    });
 }
 
 fn keys(input: Res<ButtonInput<KeyCode>>, live: Res<Live>, link: Res<Link>) {
@@ -298,7 +275,7 @@ fn keys(input: Res<ButtonInput<KeyCode>>, live: Res<Live>, link: Res<Link>) {
 fn cards(
     live: Res<Live>,
     mut readings: Query<(&Reading, &mut Text, &mut TextColor), Without<Details>>,
-    mut details: Query<(&Details, &mut Text), Without<Reading>>,
+    mut details: Query<(&Details, &mut Text, &mut Node), Without<Reading>>,
 ) {
     let Some(f) = &live.0 else {
         for (_, mut text, mut color) in &mut readings {
@@ -315,26 +292,33 @@ fn cards(
             continue;
         };
         let reading = t.reading_c().filter(|_| n.powered);
-        text.0 = reading.map_or("NO DATA".into(), |c| format!("{c:.2} C"));
+        text.0 = reading.map_or("NO DATA".into(), |c| format!("{c:.1} C"));
         color.0 = temperature_color(reading);
     }
-    for (id, mut text) in &mut details {
-        let n = node(f, id.0);
-        let power = if n.mains { "mains" } else { "battery" };
-        let network = if n.network_up { "online" } else { "offline" };
-        let mut s = format!("{power} {:.0}%  {network}", n.battery_level * 100.0);
-        if let Some(t) = &n.thermal {
-            let door = if t.door_open { "open" } else { "closed" };
-            s += &format!(
-                "\ndoor {door}  air {:.2} C  cooling {:.0} W",
-                t.air_c, t.cooling_w
-            );
+    for (id, mut text, mut layout) in &mut details {
+        text.0 = exceptions(id.0, node(f, id.0)).join("  ");
+        layout.display = if text.0.is_empty() {
+            Display::None
         } else {
-            let badge = n.last_scan.as_deref().unwrap_or("none");
-            s += &format!("\nlast badge {badge} ({})", n.scan_count);
-        }
-        text.0 = s;
+            Display::Flex
+        };
     }
+}
+
+fn exceptions(id: NodeId, n: &sim_core::Node) -> Vec<String> {
+    let mut list = Vec::new();
+    if n.thermal.as_ref().is_some_and(|t| t.door_open) {
+        list.push("open".into());
+    }
+    // The carrier always runs on its battery.
+    let carrier = id == NodeId::Carrier;
+    if !n.mains && (!carrier || n.battery_level < 0.2) {
+        list.push(format!("battery {:.0}%", n.battery_level * 100.0));
+    }
+    if !n.network_up {
+        list.push("offline".into());
+    }
+    list
 }
 
 fn clock(live: Res<Live>, mut clocks: Query<&mut Text, With<Clock>>) {
@@ -343,22 +327,16 @@ fn clock(live: Res<Live>, mut clocks: Query<&mut Text, With<Clock>>) {
             None => "Connecting".into(),
             Some(f) => {
                 let s = f.world.time_ms / 1000;
-                let mode = if f.finished {
-                    "finished"
-                } else if f.paused {
-                    "paused"
-                } else {
-                    "running"
-                };
-                format!(
-                    "{:02}:{:02}:{:02}  {}x  {mode}",
-                    s / 3600,
-                    s / 60 % 60,
-                    s % 60,
-                    f.speed
-                )
+                format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
             }
         };
+    }
+}
+
+fn speed(live: Res<Live>, mut labels: Query<&mut Text, With<SpeedLabel>>) {
+    let Some(f) = &live.0 else { return };
+    for mut text in &mut labels {
+        text.0 = format!("{}x", f.speed);
     }
 }
 
@@ -370,38 +348,5 @@ fn buttons(live: Res<Live>, mut query: Query<(&Op, &Hovered, &mut BackgroundColo
             _ if hovered.0 => HOVER,
             _ => IDLE,
         };
-    }
-}
-
-fn record(live: Res<Live>, mut history: ResMut<History>) {
-    let Some(f) = &live.0 else { return };
-    let now = f.world.time_ms;
-    if now < history.last_ms {
-        *history = History::default();
-    }
-    if history.samples.is_empty() || now >= history.last_ms + SAMPLE_MS {
-        history.last_ms = now;
-        let n = &f.world.fridge;
-        let reading = n.thermal.as_ref().and_then(|t| t.reading_c());
-        history.samples.push_back(reading.filter(|_| n.powered));
-        if history.samples.len() > BARS {
-            history.samples.pop_front();
-        }
-    }
-}
-
-fn chart(history: Res<History>, mut bars: Query<(&Bar, &mut Node, &mut BackgroundColor)>) {
-    if !history.is_changed() {
-        return;
-    }
-    for (bar, mut node, mut color) in &mut bars {
-        match history.samples.get(bar.0).copied().flatten() {
-            Some(t) => {
-                let ratio = ((t - CHART_MIN) / (CHART_MAX - CHART_MIN)).clamp(0.0, 1.0);
-                node.bottom = px(ratio as f32 * (CHART_HEIGHT - 3.0));
-                color.0 = temperature_color(Some(t));
-            }
-            None => color.0 = Color::NONE,
-        }
     }
 }

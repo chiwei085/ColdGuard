@@ -1,24 +1,31 @@
-//! Clinic room, devices and camera.
+//! Clinic model, lighting and camera.
 
 use crate::{Live, link::Link};
 use bevy::{
+    anti_alias::{
+        contrast_adaptive_sharpening::ContrastAdaptiveSharpening, taa::TemporalAntiAliasing,
+    },
+    asset::RenderAssetUsages,
     camera::Hdr,
+    gltf::GltfMaterialName,
     input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
+    light::{CascadeShadowConfigBuilder, GeneratedEnvironmentMapLight, NotShadowCaster, RectLight},
+    pbr::{ContactShadows, ScreenSpaceAmbientOcclusion, ScreenSpaceTransmission},
     post_process::bloom::Bloom,
     prelude::*,
+    render::render_resource::{
+        Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
+    },
+    world_serialization::WorldInstanceReady,
 };
 use sim_core::{Action, Node as SimNode, NodeId};
-use std::f32::consts::{FRAC_PI_2, PI};
 
 pub fn plugin(app: &mut App) {
-    app.insert_resource(ClearColor(Color::srgb(0.16, 0.22, 0.26)))
-        .insert_resource(GlobalAmbientLight {
-            color: Color::srgb(0.85, 0.92, 1.0),
-            brightness: 140.0,
-            ..default()
-        })
-        .add_systems(Startup, (room, fridge, carrier, terminal, staff, camera))
-        .add_systems(Update, (hinges, lamps, interior, fan, walk, orbit));
+    app.insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(GlobalAmbientLight::NONE)
+        .add_systems(Startup, (model, lights, camera))
+        .add_systems(Update, (hinges, lamps, interior, glow, fan, orbit))
+        .add_observer(bind);
 }
 
 /// Rotates toward the physical door state.
@@ -30,7 +37,7 @@ struct Hinge {
     angle: f32,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 struct Lamp {
     node: NodeId,
     kind: LampKind,
@@ -41,20 +48,18 @@ enum LampKind {
     Temperature,
     Power,
     Network,
+    Screen,
 }
 
 #[derive(Component)]
 struct Interior(NodeId);
 
-#[derive(Component)]
-struct Fan;
+/// Light strip inside the fridge.
+#[derive(Component, Clone)]
+struct FridgeGlow;
 
 #[derive(Component)]
-struct Staff {
-    scans: u64,
-    /// Seconds left at the terminal.
-    visit: f32,
-}
+struct Fan;
 
 #[derive(Component)]
 struct Orbit {
@@ -83,425 +88,6 @@ pub fn temperature_color(reading: Option<f64>) -> Color {
     }
 }
 
-/// Spawning helper for boxes.
-struct Kit<'a, 'w, 's> {
-    commands: &'a mut Commands<'w, 's>,
-    meshes: &'a mut Assets<Mesh>,
-    materials: &'a mut Assets<StandardMaterial>,
-}
-
-impl Kit<'_, '_, '_> {
-    fn paint(&mut self, r: f32, g: f32, b: f32, roughness: f32) -> Handle<StandardMaterial> {
-        self.materials.add(StandardMaterial {
-            base_color: Color::srgb(r, g, b),
-            perceptual_roughness: roughness,
-            ..default()
-        })
-    }
-
-    fn glow(&mut self) -> Handle<StandardMaterial> {
-        self.materials.add(StandardMaterial {
-            base_color: Color::BLACK,
-            ..default()
-        })
-    }
-
-    fn block(&mut self, size: Vec3, at: Vec3, material: &Handle<StandardMaterial>) -> Entity {
-        self.part(Cuboid::from_size(size), at, material)
-    }
-
-    fn part(
-        &mut self,
-        mesh: impl Into<Mesh>,
-        at: Vec3,
-        material: &Handle<StandardMaterial>,
-    ) -> Entity {
-        self.commands
-            .spawn((
-                Mesh3d(self.meshes.add(mesh)),
-                MeshMaterial3d(material.clone()),
-                Transform::from_translation(at),
-            ))
-            .id()
-    }
-
-    fn lamp(&mut self, node: NodeId, kind: LampKind, size: Vec3, at: Vec3) -> Entity {
-        let material = self.glow();
-        let lamp = self.block(size, at, &material);
-        self.commands.entity(lamp).insert(Lamp { node, kind });
-        lamp
-    }
-
-    fn lamps(&mut self, node: NodeId, at: Vec3) {
-        for (i, kind) in [LampKind::Power, LampKind::Network].into_iter().enumerate() {
-            self.lamp(node, kind, Vec3::splat(0.05), at + Vec3::X * 0.1 * i as f32);
-        }
-    }
-
-    /// Click to open or close the door.
-    fn clickable(&mut self, entity: Entity, toggle: NodeId) {
-        self.commands.entity(entity).observe(
-            move |_: On<PointerClick>, live: Res<Live>, link: Res<Link>| {
-                if let Some(t) = live
-                    .0
-                    .as_ref()
-                    .and_then(|f| node(f, toggle).thermal.as_ref())
-                {
-                    link.act(Action::Door {
-                        node: toggle,
-                        open: !t.door_open,
-                    });
-                }
-            },
-        );
-    }
-}
-
-fn room(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mut k = Kit {
-        commands: &mut commands,
-        meshes: &mut meshes,
-        materials: &mut materials,
-    };
-    let grout = k.paint(0.5, 0.54, 0.57, 0.9);
-    k.block(vec3(12.0, 0.1, 9.0), vec3(0.0, -0.06, 0.0), &grout);
-    let tile = k.paint(0.72, 0.76, 0.78, 0.35);
-    for x in 0..12 {
-        for z in 0..9 {
-            let at = vec3(x as f32 - 5.5, 0.0, z as f32 - 4.0);
-            k.block(vec3(0.97, 0.02, 0.97), at, &tile);
-        }
-    }
-    let wall = k.paint(0.8, 0.85, 0.85, 0.95);
-    let trim = k.paint(0.18, 0.48, 0.5, 0.6);
-    k.block(vec3(12.0, 4.0, 0.1), vec3(0.0, 2.0, -4.5), &wall);
-    k.block(vec3(0.1, 4.0, 9.0), vec3(-6.0, 2.0, 0.0), &wall);
-    k.block(vec3(12.0, 0.35, 0.04), vec3(0.0, 1.2, -4.43), &trim);
-    k.block(vec3(0.04, 0.35, 9.0), vec3(-5.93, 1.2, 0.0), &trim);
-
-    // Window on the left wall.
-    let sky = k.materials.add(StandardMaterial {
-        base_color: Color::srgb(0.5, 0.75, 0.95),
-        emissive: LinearRgba::rgb(0.8, 1.3, 1.8),
-        ..default()
-    });
-    let frame = k.paint(0.95, 0.95, 0.95, 0.5);
-    k.block(vec3(0.06, 1.5, 2.4), vec3(-5.93, 2.5, 1.0), &frame);
-    for z in [0.43, 1.57] {
-        k.block(vec3(0.08, 1.3, 1.04), vec3(-5.92, 2.5, z), &sky);
-    }
-
-    // Counter under the carrier.
-    let cabinet = k.paint(0.88, 0.89, 0.9, 0.6);
-    let top = k.paint(0.25, 0.28, 0.32, 0.25);
-    k.block(vec3(3.2, 0.9, 1.0), vec3(0.4, 0.45, -3.7), &cabinet);
-    k.block(vec3(3.3, 0.06, 1.1), vec3(0.4, 0.93, -3.68), &top);
-    let gap = k.paint(0.6, 0.63, 0.65, 0.6);
-    for x in [-0.4, 0.4, 1.2] {
-        k.block(vec3(0.02, 0.8, 0.02), vec3(x, 0.45, -3.2), &gap);
-    }
-
-    // Medical cross.
-    let cross = k.materials.add(StandardMaterial {
-        base_color: Color::srgb(0.1, 0.7, 0.55),
-        emissive: LinearRgba::rgb(0.1, 1.2, 0.8),
-        ..default()
-    });
-    k.block(vec3(0.75, 0.24, 0.06), vec3(0.4, 2.9, -4.4), &cross);
-    k.block(vec3(0.24, 0.75, 0.06), vec3(0.4, 2.9, -4.4), &cross);
-
-    // Plant.
-    let pot = k.paint(0.75, 0.42, 0.3, 0.8);
-    let leaf = k.paint(0.15, 0.5, 0.22, 0.8);
-    k.part(Cylinder::new(0.25, 0.5), vec3(-5.3, 0.25, -0.9), &pot);
-    for (x, y, z, r) in [
-        (0.0, 0.9, 0.0, 0.4),
-        (0.2, 1.15, 0.1, 0.28),
-        (-0.15, 1.3, -0.1, 0.25),
-    ] {
-        k.part(Sphere::new(r), vec3(-5.3 + x, y, -0.9 + z), &leaf);
-    }
-
-    k.commands.spawn((
-        DirectionalLight {
-            illuminance: 7_500.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(4.0, 8.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-    for x in [-3.0, 3.0] {
-        k.commands.spawn((
-            PointLight {
-                intensity: 220_000.0,
-                range: 14.0,
-                color: Color::srgb(1.0, 0.97, 0.9),
-                ..default()
-            },
-            Transform::from_xyz(x, 3.8, 0.5),
-        ));
-    }
-}
-
-fn fridge(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mut k = Kit {
-        commands: &mut commands,
-        meshes: &mut meshes,
-        materials: &mut materials,
-    };
-    let origin = vec3(-3.2, 0.0, -3.7);
-    let shell = k.paint(0.9, 0.92, 0.94, 0.3);
-    let inner = k.paint(0.82, 0.9, 0.96, 0.6);
-    let steel = k.materials.add(StandardMaterial {
-        base_color: Color::srgb(0.7, 0.72, 0.75),
-        metallic: 0.9,
-        perceptual_roughness: 0.3,
-        ..default()
-    });
-    for (size, at) in [
-        (vec3(1.6, 2.3, 0.1), vec3(0.0, 1.15, -0.5)),
-        (vec3(0.1, 2.3, 1.0), vec3(-0.75, 1.15, 0.0)),
-        (vec3(0.1, 2.3, 1.0), vec3(0.75, 1.15, 0.0)),
-        (vec3(1.6, 0.35, 1.0), vec3(0.0, 0.175, 0.0)),
-        (vec3(1.6, 0.35, 1.0), vec3(0.0, 2.3, 0.0)),
-    ] {
-        k.block(size, origin + at, &shell);
-    }
-    k.block(
-        vec3(1.4, 1.8, 0.02),
-        origin + vec3(0.0, 1.25, -0.43),
-        &inner,
-    );
-
-    // Shelves with vaccine boxes.
-    let boxes = [
-        k.paint(0.95, 0.75, 0.25, 0.7),
-        k.paint(0.3, 0.6, 0.9, 0.7),
-        k.paint(0.9, 0.45, 0.5, 0.7),
-    ];
-    for (row, y) in [0.45_f32, 0.95, 1.45].into_iter().enumerate() {
-        k.block(vec3(1.4, 0.03, 0.8), origin + vec3(0.0, y, 0.0), &steel);
-        for col in 0..5 {
-            let size = vec3(0.2, 0.16 + 0.04 * ((row + col) % 3) as f32, 0.3);
-            let at = vec3(-0.52 + 0.26 * col as f32, y + 0.015 + size.y / 2.0, 0.1);
-            k.block(size, origin + at, &boxes[(row * 2 + col) % 3]);
-        }
-    }
-    // Glycol probe bottle.
-    let glycol = k.materials.add(StandardMaterial {
-        base_color: Color::srgba(0.3, 0.8, 0.9, 0.7),
-        alpha_mode: AlphaMode::Blend,
-        ..default()
-    });
-    k.part(
-        Cylinder::new(0.06, 0.25),
-        origin + vec3(0.6, 1.09, 0.28),
-        &glycol,
-    );
-
-    let light = k
-        .commands
-        .spawn((
-            PointLight {
-                intensity: 0.0,
-                range: 4.0,
-                color: Color::srgb(0.8, 0.93, 1.0),
-                ..default()
-            },
-            Transform::from_translation(origin + vec3(0.0, 1.9, 0.3)),
-        ))
-        .id();
-    k.commands.entity(light).insert(Interior(NodeId::Fridge));
-
-    // Door hinged on the left edge.
-    let glass = k.materials.add(StandardMaterial {
-        base_color: Color::srgba(0.65, 0.85, 0.95, 0.22),
-        alpha_mode: AlphaMode::Blend,
-        perceptual_roughness: 0.08,
-        ..default()
-    });
-    let hinge = k
-        .commands
-        .spawn((
-            Hinge {
-                node: NodeId::Fridge,
-                axis: Vec3::Y,
-                open: -1.9,
-                angle: 0.0,
-            },
-            Transform::from_translation(origin + vec3(-0.75, 1.23, 0.55)),
-            Visibility::default(),
-        ))
-        .id();
-    for (size, at, material) in [
-        (vec3(1.3, 1.6, 0.03), vec3(0.75, 0.0, 0.0), &glass),
-        (vec3(1.5, 0.12, 0.08), vec3(0.75, 0.83, 0.0), &shell),
-        (vec3(1.5, 0.12, 0.08), vec3(0.75, -0.83, 0.0), &shell),
-        (vec3(0.12, 1.75, 0.08), vec3(0.06, 0.0, 0.0), &shell),
-        (vec3(0.12, 1.75, 0.08), vec3(1.44, 0.0, 0.0), &shell),
-        (vec3(0.05, 0.6, 0.06), vec3(1.44, 0.0, 0.08), &steel),
-    ] {
-        let part = k.block(size, at, material);
-        k.clickable(part, NodeId::Fridge);
-        k.commands.entity(hinge).add_child(part);
-    }
-
-    let strip = vec3(1.1, 0.07, 0.03);
-    k.lamp(
-        NodeId::Fridge,
-        LampKind::Temperature,
-        strip,
-        origin + vec3(0.0, 2.36, 0.51),
-    );
-    k.lamps(NodeId::Fridge, origin + vec3(0.5, 2.22, 0.51));
-
-    // Compressor fan, spinning while cooling.
-    let blades = k
-        .commands
-        .spawn((
-            Fan,
-            Transform::from_translation(origin + vec3(0.0, 0.18, 0.53)),
-            Visibility::default(),
-        ))
-        .id();
-    for i in 0..4 {
-        let blade = k.block(vec3(0.24, 0.05, 0.02), Vec3::ZERO, &steel);
-        k.commands
-            .entity(blade)
-            .insert(Transform::from_rotation(Quat::from_rotation_z(
-                i as f32 * PI / 4.0,
-            )));
-        k.commands.entity(blades).add_child(blade);
-    }
-}
-
-fn carrier(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mut k = Kit {
-        commands: &mut commands,
-        meshes: &mut meshes,
-        materials: &mut materials,
-    };
-    let origin = vec3(0.4, 0.96, -3.6);
-    let shell = k.paint(0.12, 0.4, 0.65, 0.5);
-    let lid = k.paint(0.92, 0.94, 0.96, 0.4);
-    let pack = k.paint(0.5, 0.8, 0.95, 0.3);
-    for (size, at) in [
-        (vec3(1.1, 0.06, 0.7), vec3(0.0, 0.03, 0.0)),
-        (vec3(1.1, 0.55, 0.07), vec3(0.0, 0.28, 0.32)),
-        (vec3(1.1, 0.55, 0.07), vec3(0.0, 0.28, -0.32)),
-        (vec3(0.07, 0.55, 0.7), vec3(0.52, 0.28, 0.0)),
-        (vec3(0.07, 0.55, 0.7), vec3(-0.52, 0.28, 0.0)),
-    ] {
-        let part = k.block(size, origin + at, &shell);
-        k.clickable(part, NodeId::Carrier);
-    }
-    for x in [-0.4, 0.4] {
-        k.block(vec3(0.1, 0.4, 0.5), origin + vec3(x, 0.26, 0.0), &pack);
-    }
-    let vial = k.paint(0.95, 0.75, 0.25, 0.7);
-    for x in [-0.2, 0.0, 0.2] {
-        k.block(vec3(0.16, 0.25, 0.3), origin + vec3(x, 0.19, 0.0), &vial);
-    }
-    let hinge = k
-        .commands
-        .spawn((
-            Hinge {
-                node: NodeId::Carrier,
-                axis: Vec3::X,
-                open: -1.7,
-                angle: 0.0,
-            },
-            Transform::from_translation(origin + vec3(0.0, 0.56, -0.35)),
-            Visibility::default(),
-        ))
-        .id();
-    for (size, at) in [
-        (vec3(1.14, 0.1, 0.74), vec3(0.0, 0.05, 0.36)),
-        (vec3(0.4, 0.05, 0.06), vec3(0.0, 0.14, 0.36)),
-    ] {
-        let part = k.block(size, at, &lid);
-        k.clickable(part, NodeId::Carrier);
-        k.commands.entity(hinge).add_child(part);
-    }
-    let strip = vec3(0.6, 0.06, 0.02);
-    k.lamp(
-        NodeId::Carrier,
-        LampKind::Temperature,
-        strip,
-        origin + vec3(-0.1, 0.4, 0.365),
-    );
-    k.lamps(NodeId::Carrier, origin + vec3(0.32, 0.4, 0.365));
-}
-
-fn terminal(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mut k = Kit {
-        commands: &mut commands,
-        meshes: &mut meshes,
-        materials: &mut materials,
-    };
-    let origin = vec3(3.9, 0.0, -2.9);
-    let wood = k.paint(0.62, 0.46, 0.3, 0.6);
-    let dark = k.paint(0.1, 0.11, 0.13, 0.4);
-    let reader = k.paint(0.15, 0.45, 0.75, 0.4);
-    k.block(vec3(2.2, 0.08, 1.1), origin + vec3(0.0, 0.8, 0.0), &wood);
-    for x in [-1.0, 1.0] {
-        k.block(vec3(0.08, 0.8, 1.0), origin + vec3(x, 0.4, 0.0), &wood);
-    }
-    k.block(
-        vec3(0.3, 0.04, 0.25),
-        origin + vec3(-0.2, 0.86, -0.2),
-        &dark,
-    );
-    k.block(
-        vec3(0.06, 0.3, 0.06),
-        origin + vec3(-0.2, 1.0, -0.22),
-        &dark,
-    );
-    k.block(vec3(1.1, 0.7, 0.06), origin + vec3(-0.2, 1.42, -0.2), &dark);
-    let screen = vec3(1.0, 0.6, 0.02);
-    k.lamp(
-        NodeId::Inventory,
-        LampKind::Power,
-        screen,
-        origin + vec3(-0.2, 1.42, -0.16),
-    );
-    k.block(
-        vec3(0.8, 0.03, 0.28),
-        origin + vec3(-0.2, 0.86, 0.25),
-        &dark,
-    );
-    let pad = k.block(
-        vec3(0.32, 0.06, 0.32),
-        origin + vec3(0.7, 0.87, 0.2),
-        &reader,
-    );
-    k.commands
-        .entity(pad)
-        .observe(|_: On<PointerClick>, link: Res<Link>| link.act(scan()));
-    k.lamp(
-        NodeId::Inventory,
-        LampKind::Network,
-        vec3(0.12, 0.02, 0.12),
-        origin + vec3(0.7, 0.91, 0.2),
-    );
-}
-
 /// Demo staff badge at the inventory reader.
 pub fn scan() -> Action {
     Action::Scan {
@@ -510,50 +96,327 @@ pub fn scan() -> Action {
     }
 }
 
-fn staff(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mut k = Kit {
-        commands: &mut commands,
-        meshes: &mut meshes,
-        materials: &mut materials,
-    };
-    let coat = k.paint(0.95, 0.97, 0.98, 0.8);
-    let skin = k.paint(0.85, 0.65, 0.5, 0.7);
-    let hair = k.paint(0.15, 0.1, 0.08, 0.9);
-    let person = k
-        .commands
-        .spawn((
-            Staff {
-                scans: 0,
-                visit: 0.0,
-            },
-            Transform::from_translation(REST),
-            Visibility::default(),
-        ))
-        .id();
-    let parts = [
-        k.part(Capsule3d::new(0.26, 0.75), vec3(0.0, 0.75, 0.0), &coat),
-        k.part(Sphere::new(0.2), vec3(0.0, 1.55, 0.0), &skin),
-        k.part(Sphere::new(0.21), vec3(0.0, 1.63, 0.03), &hair),
-        k.part(Capsule3d::new(0.08, 0.5), vec3(-0.32, 0.9, 0.0), &coat),
-        k.part(Capsule3d::new(0.08, 0.5), vec3(0.32, 0.9, 0.0), &coat),
-    ];
-    k.commands.entity(person).add_children(&parts);
+fn model(mut commands: Commands, assets: Res<AssetServer>) {
+    commands.spawn(WorldAssetRoot(
+        assets.load(GltfAssetLabel::Scene(0).from_asset("clinic.glb")),
+    ));
 }
 
-fn camera(mut commands: Commands) {
+/// Adds behavior to the model nodes by name.
+fn bind(
+    ready: On<WorldInstanceReady>,
+    mut commands: Commands,
+    names: Query<&Name>,
+    children: Query<&Children>,
+    surfaces: Query<(&GltfMaterialName, &MeshMaterial3d<StandardMaterial>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for entity in children.iter_descendants(ready.entity) {
+        if let Ok((name, handle)) = surfaces.get(entity) {
+            if name.0 == "glass" {
+                // Blended surfaces read the normals of whatever is behind them.
+                if let Some(mut glass) = materials.get_mut(&handle.0) {
+                    glass.alpha_mode = AlphaMode::Opaque;
+                    glass.base_color = Color::srgb(0.94, 0.97, 0.96);
+                    glass.specular_transmission = 0.96;
+                }
+                commands.entity(entity).insert(NotShadowCaster);
+            }
+            continue;
+        }
+        let Ok(name) = names.get(entity) else {
+            continue;
+        };
+        let hinge = |node, axis, open| Hinge {
+            node,
+            axis,
+            open,
+            angle: 0.0,
+        };
+        match name.as_str() {
+            "fridge_door" => {
+                commands
+                    .entity(entity)
+                    .insert(hinge(NodeId::Fridge, Vec3::Y, -1.6))
+                    .observe(toggle(NodeId::Fridge));
+            }
+            "carrier_lid" => {
+                commands
+                    .entity(entity)
+                    .insert(hinge(NodeId::Carrier, Vec3::X, -1.75))
+                    .observe(toggle(NodeId::Carrier));
+            }
+            "carrier_body" => {
+                commands.entity(entity).observe(toggle(NodeId::Carrier));
+            }
+            "fridge_fan" => {
+                commands.entity(entity).insert(Fan);
+            }
+            "reader" => {
+                commands
+                    .entity(entity)
+                    .observe(|_: On<PointerClick>, link: Res<Link>| link.act(scan()));
+            }
+            "sky" => {
+                for part in children.iter_descendants(entity) {
+                    commands.entity(part).insert(NotShadowCaster);
+                }
+            }
+            "glow_fridge" => own_materials(
+                entity,
+                FridgeGlow,
+                &mut commands,
+                &children,
+                &surfaces,
+                &mut materials,
+            ),
+            other => {
+                let Some(lamp) = lamp(other) else { continue };
+                own_materials(
+                    entity,
+                    lamp,
+                    &mut commands,
+                    &children,
+                    &surfaces,
+                    &mut materials,
+                );
+            }
+        }
+    }
+}
+
+fn lamp(name: &str) -> Option<Lamp> {
+    let (node, kind) = name.strip_prefix("lamp_")?.split_once('_')?;
+    Some(Lamp {
+        node: match node {
+            "fridge" => NodeId::Fridge,
+            "carrier" => NodeId::Carrier,
+            "inventory" => NodeId::Inventory,
+            _ => return None,
+        },
+        kind: match kind {
+            "temperature" => LampKind::Temperature,
+            "power" => LampKind::Power,
+            "network" => LampKind::Network,
+            "screen" => LampKind::Screen,
+            _ => return None,
+        },
+    })
+}
+
+/// Gives each lit surface its own material, since the model shares them.
+fn own_materials(
+    root: Entity,
+    tag: impl Component + Clone,
+    commands: &mut Commands,
+    children: &Query<&Children>,
+    surfaces: &Query<(&GltfMaterialName, &MeshMaterial3d<StandardMaterial>)>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    for part in children.iter_descendants(root) {
+        let Ok((_, handle)) = surfaces.get(part) else {
+            continue;
+        };
+        if let Some(copy) = materials.get(&handle.0).cloned() {
+            commands
+                .entity(part)
+                .insert((MeshMaterial3d(materials.add(copy)), tag.clone()));
+        }
+    }
+}
+
+/// Click to open or close the door.
+fn toggle(id: NodeId) -> impl Fn(On<PointerClick>, Res<Live>, Res<Link>) {
+    move |_, live, link| {
+        if let Some(t) = live.0.as_ref().and_then(|f| node(f, id).thermal.as_ref()) {
+            link.act(Action::Door {
+                node: id,
+                open: !t.door_open,
+            });
+        }
+    }
+}
+
+/// The window sets the main direction. Panels and interior lamps fill.
+fn lights(mut commands: Commands) {
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 21_000.0,
+            color: Color::srgb(1.0, 0.94, 0.84),
+            shadow_maps_enabled: true,
+            contact_shadows_enabled: true,
+            soft_shadow_size: Some(6.0),
+            ..default()
+        },
+        CascadeShadowConfigBuilder {
+            maximum_distance: 11.0,
+            first_cascade_far_bound: 4.5,
+            ..default()
+        }
+        .build(),
+        Transform::from_xyz(-4.6, 3.1, 3.6).looking_at(vec3(0.2, 0.75, 0.3), Vec3::Y),
+    ));
+    // A spot, since a RectLight casts no shadows.
+    commands.spawn((
+        SpotLight {
+            color: Color::srgb(0.84, 0.92, 1.0),
+            intensity: 620_000.0,
+            range: 12.0,
+            radius: 0.5,
+            inner_angle: 0.5,
+            outer_angle: 1.12,
+            shadow_maps_enabled: true,
+            soft_shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(-2.0, 1.75, 2.3).looking_at(vec3(0.3, 0.9, 0.4), Vec3::Y),
+    ));
+    for x in [-0.9, 1.9] {
+        commands.spawn((
+            RectLight {
+                color: Color::srgb(1.0, 0.97, 0.92),
+                intensity: 48_000.0,
+                width: 1.2,
+                height: 0.6,
+                range: 9.0,
+            },
+            Transform::from_xyz(x, 2.76, 2.0).looking_to(Vec3::NEG_Y, Vec3::Z),
+        ));
+    }
+    commands.spawn((
+        PointLight {
+            intensity: 0.0,
+            range: 2.2,
+            color: Color::srgb(0.93, 0.97, 1.0),
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(-0.87, 1.66, 0.62),
+        Interior(NodeId::Fridge),
+    ));
+}
+
+/// Room seen from its center, for reflections.
+fn surroundings() -> Image {
+    const N: u32 = 128;
+    const LOW: Vec3 = vec3(-2.2, 0.0, 0.0);
+    const HIGH: Vec3 = vec3(3.4, 2.8, 5.6);
+    let eye = vec3(0.2, 1.3, 1.9);
+    let mut data = Vec::with_capacity((N * N * 6 * 16) as usize);
+    for face in 0..6 {
+        for y in 0..N {
+            for x in 0..N {
+                let u = (x as f32 + 0.5) / N as f32 * 2.0 - 1.0;
+                let v = 1.0 - (y as f32 + 0.5) / N as f32 * 2.0;
+                let d = match face {
+                    0 => vec3(1.0, v, -u),
+                    1 => vec3(-1.0, v, u),
+                    2 => vec3(u, 1.0, -v),
+                    3 => vec3(u, -1.0, v),
+                    4 => vec3(u, v, 1.0),
+                    _ => vec3(-u, v, -1.0),
+                }
+                .normalize();
+                // Cubemaps are left handed.
+                let d = vec3(d.x, d.y, -d.z);
+                let far = Vec3::select(d.cmpgt(Vec3::ZERO), HIGH, LOW);
+                let t = ((far - eye) / d).min_element();
+                let hit = eye + d * t;
+                for c in surface(hit, LOW, HIGH).to_array() {
+                    data.extend(c.to_le_bytes());
+                }
+                data.extend(1.0_f32.to_le_bytes());
+            }
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: N,
+            height: N,
+            depth_or_array_layers: 6,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba32Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::Cube),
+        ..default()
+    });
+    image
+}
+
+/// Radiance of a room surface.
+fn surface(p: Vec3, low: Vec3, high: Vec3) -> Vec3 {
+    let lit = |x: f32| (p.x - x).abs() < 0.6 && (p.z - 2.0).abs() < 0.3;
+    if p.y > high.y - 0.01 {
+        return if lit(-0.9) || lit(1.9) {
+            vec3(9.0, 8.8, 8.4)
+        } else {
+            Vec3::splat(0.6)
+        };
+    }
+    if p.y < low.y + 0.01 {
+        return vec3(0.28, 0.28, 0.27);
+    }
+    if p.x < low.x + 0.01 && (1.0..2.25).contains(&p.y) && (1.05..2.75).contains(&p.z) {
+        let mullion = (p.z - 1.9).abs() < 0.04;
+        return if mullion {
+            Vec3::splat(0.5)
+        } else {
+            vec3(9.0, 10.5, 12.0)
+        };
+    }
+    let wall = if p.y < 1.08 {
+        vec3(0.3, 0.35, 0.33)
+    } else {
+        vec3(0.52, 0.52, 0.5)
+    };
+    // Farther from the window is darker.
+    wall * (1.1 - 0.11 * (p.x - low.x))
+}
+
+fn camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         Camera3d::default(),
+        Projection::from(PerspectiveProjection {
+            fov: 0.6,
+            near: 0.05,
+            ..default()
+        }),
         Hdr,
-        Bloom::NATURAL,
+        Msaa::Off,
+        TemporalAntiAliasing::default(),
+        ContrastAdaptiveSharpening {
+            enabled: true,
+            sharpening_strength: 0.4,
+            ..default()
+        },
+        ScreenSpaceAmbientOcclusion {
+            radius: 0.35,
+            ..default()
+        },
+        ScreenSpaceTransmission::default(),
+        ContactShadows {
+            length: 0.06,
+            thickness: 0.03,
+            ..default()
+        },
+        GeneratedEnvironmentMapLight {
+            environment_map: images.add(surroundings()),
+            intensity: 430.0,
+            ..default()
+        },
+        Bloom {
+            intensity: 0.06,
+            ..Bloom::NATURAL
+        },
         Orbit {
-            focus: vec3(-0.3, 0.95, -2.8),
-            yaw: 0.16,
-            pitch: 0.32,
-            distance: 8.6,
+            focus: vec3(-0.15, 1.06, 0.3),
+            yaw: 0.2,
+            pitch: 0.06,
+            distance: 4.75,
         },
         Transform::default(),
     ));
@@ -597,12 +460,18 @@ fn lamps(
                     n.mains || n.battery_level > 0.2,
                     Color::srgb(0.1, 0.6, 0.75),
                 ),
+                LampKind::Screen => Color::WHITE,
                 LampKind::Network => on(n.network_up, Color::srgb(0.2, 0.9, 0.4)),
             }
         });
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.base_color = color;
-            material.emissive = color.to_linear() * 2.0;
+            material.emissive = color.to_linear()
+                * if matches!(lamp.kind, LampKind::Screen) {
+                    1.0
+                } else {
+                    4.0
+                };
         }
     }
 }
@@ -614,9 +483,22 @@ fn interior(live: Res<Live>, mut lights: Query<(&Interior, &mut PointLight)>) {
         let open = n.thermal.as_ref().is_some_and(|t| t.door_open);
         light.intensity = match (n.mains, open) {
             (false, _) => 0.0,
-            (true, false) => 25_000.0,
-            (true, true) => 80_000.0,
+            (true, false) => 32_000.0,
+            (true, true) => 42_000.0,
         };
+    }
+}
+
+fn glow(
+    live: Res<Live>,
+    strips: Query<&MeshMaterial3d<StandardMaterial>, With<FridgeGlow>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let on = live.0.as_ref().is_some_and(|f| f.world.fridge.mains);
+    for handle in &strips {
+        if let Some(mut material) = materials.get_mut(&handle.0) {
+            material.emissive = LinearRgba::WHITE * if on { 6.0 } else { 0.0 };
+        }
     }
 }
 
@@ -634,42 +516,6 @@ fn fan(live: Res<Live>, time: Res<Time>, mut fans: Query<&mut Transform, With<Fa
     }
 }
 
-const REST: Vec3 = vec3(2.5, 0.0, -2.6);
-
-/// Staff walk to whatever is being operated.
-fn walk(live: Res<Live>, time: Res<Time>, mut staff: Query<(&mut Staff, &mut Transform)>) {
-    let Some(frame) = &live.0 else { return };
-    let w = &frame.world;
-    let open = |n: &SimNode| n.thermal.as_ref().is_some_and(|t| t.door_open);
-    for (mut staff, mut transform) in &mut staff {
-        // A reset lowers the count.
-        if w.inventory.scan_count > staff.scans {
-            staff.visit = 4.0;
-        }
-        staff.scans = w.inventory.scan_count;
-        staff.visit = (staff.visit - time.delta_secs()).max(0.0);
-        let goal = if staff.visit > 0.0 {
-            vec3(4.1, 0.0, -1.8)
-        } else if open(&w.fridge) {
-            vec3(-1.7, 0.0, -2.5)
-        } else if open(&w.carrier) {
-            vec3(1.4, 0.0, -2.5)
-        } else {
-            REST
-        };
-        let offset = goal - transform.translation;
-        let distance = offset.length();
-        if distance > 0.02 {
-            let step = (2.5 * time.delta_secs()).min(distance);
-            transform.translation += offset / distance * step;
-            let bob = (time.elapsed_secs() * 10.0).sin() * 0.04;
-            transform.rotation = Quat::from_rotation_z(bob);
-        } else {
-            transform.rotation = Quat::IDENTITY;
-        }
-    }
-}
-
 fn orbit(
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
@@ -682,9 +528,9 @@ fn orbit(
             o.pitch += motion.delta.y * 0.005;
         }
         // Keep the camera inside the open side of the room.
-        o.yaw = o.yaw.clamp(-0.5, FRAC_PI_2 - 0.1);
-        o.pitch = o.pitch.clamp(0.08, 1.3);
-        o.distance = (o.distance * (1.0 - scroll.delta.y * 0.08)).clamp(3.0, 14.0);
+        o.yaw = o.yaw.clamp(-0.4, 0.6);
+        o.pitch = o.pitch.clamp(0.0, 0.33);
+        o.distance = (o.distance * (1.0 - scroll.delta.y * 0.08)).clamp(1.2, 5.0);
         let direction = Quat::from_euler(EulerRot::YXZ, o.yaw, -o.pitch, 0.0) * Vec3::Z;
         *transform = Transform::from_translation(o.focus + direction * o.distance)
             .looking_at(o.focus, Vec3::Y);
