@@ -1,7 +1,7 @@
 """Builds assets/clinic.glb with Blender 4.0.
 
 Units are meters. Front is -Y. Node names starting with fridge, carrier, lamp,
-glow and sky are read by scene.rs.
+glow, sky, display, batch, dnu and spot are read by scene.rs and batches.rs.
 """
 
 import math
@@ -182,9 +182,10 @@ PAPER = material("paper", (0.75, 0.74, 0.7), rough=0.8)
 # Geometry
 
 
-def group(name, pivot=(0, 0, 0)):
+def group(name, pivot=(0, 0, 0), parent=None):
     o = bpy.data.objects.new(name, None)
     o.location = pivot
+    o.parent = parent
     scene.collection.objects.link(o)
     return o
 
@@ -338,23 +339,59 @@ def disc(name, center, radius, depth, mat, parent, sides=32, bevel=0.002):
     return add(name, v, f, mat, parent, bevel, 2)
 
 
-def lamp(name, lo, hi, parent):
-    node = group(name)
+def lamp(name, lo, hi, parent, owner=None):
+    node = group(name, parent=owner)
     box(name + "_face", lo, hi, LAMP, node, 0.0008, 2)
 
 
-def carton(parent, x, y, z, w, d, h, band):
-    box("carton", (x, y, z), (x + w, y + d, z + h), CARTON, parent, 0.0015, 2)
-    e = 0.0006
-    box("band", (x - e, y - e, z + h * 0.16), (x + w + e, y + d, z + h * 0.42), band, parent, 0)
-    box("label", (x + w * 0.15, y - e, z + h * 0.55), (x + w * 0.7, y, z + h * 0.62), KICK, parent, 0)
-    box("label", (x + w * 0.15, y - e, z + h * 0.7), (x + w * 0.5, y, z + h * 0.74), KICK, parent, 0)
+def text(value, center, size, mat, parent, side="front"):
+    """Raised lettering centered on a point. Side is front, left or top."""
+    curve = bpy.data.curves.new("text", "FONT")
+    curve.body, curve.size = value, size
+    curve.align_x, curve.align_y = "CENTER", "CENTER"
+    curve.resolution_u = 2
+    o = bpy.data.objects.new("text", curve)
+    scene.collection.objects.link(o)
+    bpy.context.view_layer.update()
+    me = bpy.data.meshes.new_from_object(o.evaluated_get(bpy.context.evaluated_depsgraph_get()))
+    bpy.data.objects.remove(o)
+    x, y, z = np.array(center) - np.array(parent.location)
+    for v in me.vertices:
+        a, b, _ = v.co
+        v.co = {"front": (x + a, y, z + b), "left": (x, y - a, z + b), "top": (x + a, y + b, z)}[side]
+    me.materials.clear()
+    me.materials.append(mat)
+    out = bpy.data.objects.new("text", me)
+    scene.collection.objects.link(out)
+    out.parent = parent
+    out.modifiers.new("triangulate", "TRIANGULATE")
+
+
+def spot(name, x, y, z, parent=None):
+    group(name, (x, y, z), parent)
+
+
+def tray(name, x0, x1, y0, y1, z, mat, parent, height=0.03):
+    shell(name, (x0, y0, z), (x1, y1, z + height), (x0 + 0.008, y0 + 0.008, z + 0.006),
+          (x1 - 0.008, y1 - 0.008, z + height), [mat, mat], parent, "top", 0.002)
+
+
+def grid(place, x, y, z, parent=None, columns=3, dx=0.145, dy=0.125):
+    """Six spots, the front row first. Starts at the front left."""
+    for i in range(MAX):
+        spot(f"spot_{place}_{i + 1}", x + i % columns * dx, y + i // columns * dy, z, parent)
 
 
 # Room
 
+MAX = 6
+BW, BD, BH = 0.13, 0.11, 0.1
+RED = material("warning_red", (0.55, 0.02, 0.015), rough=0.45)
+GREEN = material("exit_green", (0.02, 0.2, 0.1), rough=0.5)
+WHITE = material("print_white", (0.85, 0.85, 0.83), rough=0.6)
+INK = material("ink", (0.01, 0.01, 0.012), rough=0.7)
 room = group("room")
-X0, X1, Y0, TOP = -2.2, 3.4, -5.6, 2.8
+X0, X1, Y0, TOP = -2.2, 6.2, -5.6, 2.8
 box("floor", (X0, Y0, -0.1), (X1, 0, 0), FLOOR, room, 0)
 box("wall", (X0, 0, -0.1), (X1, 0.12, TOP), WALL, room, 0)
 box("wall", (X1, Y0, -0.1), (X1 + 0.12, 0.12, TOP), WALL, room, 0)
@@ -392,9 +429,9 @@ for i in range(9):
 sky = group("sky")
 box("sky_face", (X0 - 0.7, WY0 - 1.0, WZ0 - 0.6), (X0 - 0.68, WY1 + 1.0, WZ1 + 0.8), SKY, sky, 0)
 glow = group("glow_ceiling")
-for x in (-0.9, 1.9):
+for x in (-0.9, 1.9, 4.6):
     box("panel_rim", (x - 0.63, -2.33, TOP - 0.02), (x + 0.63, -1.67, TOP), TRIM, room, 0.004)
-    box("panel", (x - 0.6, -2.3, TOP - 0.022), (x + 0.6, -1.7, TOP - 0.01), LED, glow, 0)
+    box("panel", (x - 0.6, -2.3, TOP - 0.022), (x + 0.6, -1.7, TOP - 0.01), LED, glow if x < 3 else room, 0)
 
 # Outlet with the fridge cord.
 box("outlet", (-0.36, -0.012, 1.22), (-0.28, 0, 1.34), TRIM, room, 0.004)
@@ -432,7 +469,11 @@ for i in range(9):
     z = 0.124 + i * 0.0165
     box("grille_slat", (F - 0.289, DY0 + 0.004, z), (F + 0.289, DY0 + 0.016, z + 0.007), DARK, body, 0.0025, 2)
 box("display", (F - 0.3, DY0 - 0.003, 1.815), (F + 0.3, DY0 + 0.01, 1.92), BLACK, body, 0.004)
-lamp("lamp_fridge_temperature", (F - 0.26, DY0 - 0.005, 1.862), (F + 0.1, DY0 - 0.002, 1.872), body)
+display = group("display_fridge")
+box("display_face", (F - 0.27, DY0 - 0.0045, 1.838), (F + 0.15, DY0 - 0.003, 1.913), SCREEN, display, 0)
+lamp("lamp_fridge_temperature", (F - 0.26, DY0 - 0.005, 1.824), (F + 0.26, DY0 - 0.002, 1.831), body)
+text("2 - 8 \u00b0C", (F, DY0 - 0.001, 1.95), 0.04, INK, body)
+text("VACCINES ONLY", (F, DY0 + 0.0115, 0.295), 0.02, INK, body)
 lamp("lamp_fridge_power", (F + 0.19, DY0 - 0.005, 1.861), (F + 0.202, DY0 - 0.002, 1.873), body)
 lamp("lamp_fridge_network", (F + 0.23, DY0 - 0.005, 1.861), (F + 0.242, DY0 - 0.002, 1.873), body)
 for z in (DZ0 + 0.0, DZ1 - 0.012):
@@ -463,22 +504,22 @@ for level, z in enumerate((0.44, 0.75, 1.06, 1.37)):
     tube("shelf", None, 0.0018, WIRE, body, 6, segments=thin)
     for x in (IX0, IX1 - 0.006):
         box("bracket", (x, IY0, z - 0.012), (x + 0.006, IY1, z - 0.002), LINER, body, 0.001)
-    x = IX0 + 0.025
-    while True:
-        w, h, d = dice.choice([(0.07, 0.11, 0.09), (0.09, 0.14, 0.1), (0.055, 0.09, 0.08), (0.11, 0.1, 0.12)])
-        if x + w > (IX1 - 0.12 if level == 2 else IX1 - 0.02):
-            break
-        band = BANDS[(level + dice.randrange(2)) % 3]
-        y = -0.6 + dice.uniform(0, 0.025)
-        for row in range(dice.choice([1, 2, 2, 3])):
-            carton(body, x, y + row * (d + 0.006), z + 0.006, w, d, h, band)
-        if h < 0.11 and dice.random() < 0.6:
-            carton(body, x, y + 0.003, z + 0.007 + h, w, d, h, band)
-        x += w + dice.choice([0.006, 0.008, 0.035])
-# Probe in a glycol bottle on the third shelf.
-disc("bottle", (F + 0.27, -0.55, 1.066), 0.028, 0.085, ICE, body, bevel=0.006)
-disc("cap", (F + 0.27, -0.55, 1.151), 0.02, 0.018, DARK, body)
-tube("probe_cord", [(F + 0.27, -0.55, 1.165), (F + 0.275, -0.54, 1.21), (F + 0.3, -0.5, 1.23), (F + 0.322, -0.4, 1.25), (F + 0.325, -0.2, 1.3)], 0.0025, RUBBER, body, 8)
+
+for level, z in ((1, 0.754), (2, 1.064)):
+    for i in range(3):
+        box("rail", (F - 0.2 + i * 0.2 - 0.05, IY0 - 0.006, z - 0.006), (F - 0.2 + i * 0.2 + 0.05, IY0 - 0.002, z + 0.016), LID, body, 0.001)
+        text(f"{(2 - level) * 3 + i + 1}", (F - 0.2 + i * 0.2, IY0 - 0.0065, z + 0.005), 0.018, INK, body)
+for i in range(MAX):
+    spot(f"spot_fridge_{i + 1}", F - 0.2 + i % 3 * 0.2, -0.55, 1.064 - i // 3 * 0.31)
+# Locked batches stay cold in the basket below.
+tray("basket", IX0 + 0.02, IX1 - 0.02, IY0 + 0.01, IY1 - 0.06, 0.446, RED, body, 0.05)
+text("QUARANTINE   DO NOT USE", (F, IY0 + 0.0085, 0.472), 0.032, WHITE, body)
+grid("quarantine", F - 0.145, -0.55, 0.453, dx=0.145, dy=0.13)
+# Probe in a glycol bottle on the top shelf.
+disc("bottle", (F + 0.27, -0.55, 1.376), 0.028, 0.085, ICE, body, bevel=0.006)
+disc("cap", (F + 0.27, -0.55, 1.461), 0.02, 0.018, DARK, body)
+tube("probe_cord", [(F + 0.27, -0.55, 1.475), (F + 0.275, -0.54, 1.5), (F + 0.3, -0.5, 1.52), (F + 0.322, -0.4, 1.54), (F + 0.325, -0.2, 1.56)], 0.0025, RUBBER, body, 8)
+text("PROBE", (F + 0.27, -0.581, 1.41), 0.014, INK, body)
 
 # The fan sits behind the grille of the top vent.
 fan = group("fridge_fan", (F, -0.142, 1.6))
@@ -547,17 +588,23 @@ for i in range(6):
 for x, r, h in ((0.42, 0.04, 0.16), (0.53, 0.032, 0.12), (0.62, 0.032, 0.12)):
     disc("jar", (x, -0.12, 1.646), r, h, LID, counter, bevel=0.008)
     disc("jar_cap", (x, -0.12, 1.646 + h), r * 0.8, 0.025, DARK, counter, bevel=0.003)
-# Glove dispenser above the counter.
-box("gloves", (-0.02, -0.09, 1.23), (0.24, -0.012, 1.36), CARTON, counter, 0.003)
-box("gloves_band", (-0.021, -0.091, 1.24), (0.241, -0.05, 1.27), BANDS[0], counter, 0.001)
-box("gloves_slot", (0.05, -0.0915, 1.3), (0.17, -0.088, 1.335), RUBBER, counter, 0.0)
+# Battery module beside the outlet. It feeds monitoring only.
+box("ups", (-0.2, -0.1, 1.18), (0.06, -0.01, 1.48), DARK, counter, 0.008)
+box("ups_face", (-0.185, -0.104, 1.2), (0.045, -0.098, 1.46), BLACK, counter, 0.004)
+text("MONITOR", (-0.07, -0.1045, 1.43), 0.034, WHITE, counter)
+text("BATTERY", (-0.07, -0.1045, 1.395), 0.034, WHITE, counter)
+for i in range(5):
+    lamp(f"lamp_fridge_battery{i + 1}", (-0.15, -0.107, 1.22 + i * 0.03), (0.01, -0.104, 1.24 + i * 0.03), counter)
+tube("ups_cord", [(-0.28, -0.04, 1.29), (-0.25, -0.05, 1.26), (-0.22, -0.05, 1.26), (-0.19, -0.05, 1.27)], 0.004, RUBBER, counter, 8)
+tube("ups_feed", [(-0.15, -0.05, 1.19), (-0.15, -0.045, 1.1), (-0.3, -0.04, 1.03), (-0.5, -0.02, 1.0)], 0.004, RUBBER, counter, 8)
 
 # Carrier
 
 C, CZ = 0.36, 0.935
 CW, CD = 0.25, 0.17
 CB, CF = -0.15, -0.49
-carrier = group("carrier_body")
+rig = group("carrier_rig")
+carrier = group("carrier_body", parent=rig)
 shell(
     "tub",
     (C - CW, CF, CZ),
@@ -580,14 +627,19 @@ for s in (-1, 1):
         box("rib", (min(x, x + s * 0.007), y - 0.012, CZ + 0.03), (max(x, x + s * 0.007), y + 0.012, CZ + 0.24), BLUE, carrier, 0.004)
 box("plate", (C - 0.17, CF - 0.006, CZ + 0.085), (C + 0.17, CF + 0.01, CZ + 0.2), DARK, carrier, 0.008)
 box("plate_glass", (C - 0.155, CF - 0.008, CZ + 0.1), (C + 0.155, CF, CZ + 0.185), BLACK, carrier, 0.004)
-lamp("lamp_carrier_temperature", (C - 0.13, CF - 0.0095, CZ + 0.139), (C + 0.05, CF - 0.007, CZ + 0.147), carrier)
-lamp("lamp_carrier_power", (C + 0.085, CF - 0.0095, CZ + 0.138), (C + 0.095, CF - 0.007, CZ + 0.148), carrier)
-lamp("lamp_carrier_network", (C + 0.115, CF - 0.0095, CZ + 0.138), (C + 0.125, CF - 0.007, CZ + 0.148), carrier)
+shown = group("display_carrier", parent=rig)
+box("display_face", (C - 0.147, CF - 0.0095, CZ + 0.122), (C + 0.073, CF - 0.0085, CZ + 0.18), SCREEN, shown, 0)
+lamp("lamp_carrier_temperature", (C - 0.14, CF - 0.0095, CZ + 0.107), (C + 0.14, CF - 0.007, CZ + 0.113), carrier, rig)
+lamp("lamp_carrier_power", (C + 0.085, CF - 0.0095, CZ + 0.138), (C + 0.095, CF - 0.007, CZ + 0.148), carrier, rig)
+lamp("lamp_carrier_network", (C + 0.115, CF - 0.0095, CZ + 0.138), (C + 0.125, CF - 0.007, CZ + 0.148), carrier, rig)
 for s in (-1, 1):
     box("ice_pack", (C + s * 0.18 - 0.02, CF + 0.05, CZ + 0.05), (C + s * 0.18 + 0.02, CB - 0.05, CZ + 0.24), ICE, carrier, 0.008)
-for i in range(3):
-    carton(carrier, C - 0.14 + i * 0.095, CF + 0.07, CZ + 0.048, 0.085, 0.16, 0.15, BANDS[i])
-lid = group("carrier_lid", (C, CB + 0.004, CZ + 0.302))
+tube("probe", [(C - 0.14, CF + 0.06, CZ + 0.06), (C - 0.14, CF + 0.06, CZ + 0.25)], 0.006, STEEL, carrier, 12)
+tube("probe_cord", [(C - 0.14, CF + 0.06, CZ + 0.25), (C - 0.14, CF + 0.045, CZ + 0.27), (C - 0.1, CF + 0.04, CZ + 0.285)], 0.0025, RUBBER, carrier, 8)
+text("BOX-1", (C, CF - 0.0005, CZ + 0.045), 0.04, WHITE, carrier)
+for i in range(MAX):
+    spot(f"spot_carrier_{i + 1}", C - 0.069 + i % 2 * 0.138, -0.375 + i // 2 % 2 * 0.115, CZ + 0.047 + i // 4 * 0.102, rig)
+lid = group("carrier_lid", (C, CB + 0.004, CZ + 0.302), rig)
 box("lid", (C - CW - 0.006, CF - 0.006, CZ + 0.302), (C + CW + 0.006, CB + 0.006, CZ + 0.362), LID, lid, 0.014, 4)
 box("lid_crown", (C - CW + 0.04, CF + 0.04, CZ + 0.35), (C + CW - 0.04, CB - 0.04, CZ + 0.372), LID, lid, 0.008, 4)
 box("lid_plug", (C - CW + 0.05, CF + 0.05, CZ + 0.27), (C + CW - 0.05, CB - 0.05, CZ + 0.31), LINER, lid, 0.006)
@@ -601,6 +653,19 @@ grip += arc((C - 0.1, -0.32, CZ + 0.4), 0.02, 180, 90, (0, 2), 6)
 grip += arc((C + 0.1, -0.32, CZ + 0.4), 0.02, 90, 0, (0, 2), 6)
 grip += [(C + 0.12, -0.32, CZ + 0.365)]
 tube("grip", grip, 0.009, DARK, lid, 16)
+
+# Trolley under the box. The whole rig moves to the receiver.
+cart = group("cart", parent=rig)
+box("cart_top", (C - 0.31, CF - 0.06, 0.885), (C + 0.31, CB + 0.06, 0.914), STEEL, cart, 0.006)
+box("cart_shelf", (C - 0.3, CF - 0.05, 0.36), (C + 0.3, CB + 0.05, 0.38), STEEL, cart, 0.004)
+legs = [[(C + a * 0.29, (CF - 0.045 if b else CB + 0.045), 0.19), (C + a * 0.29, (CF - 0.045 if b else CB + 0.045), 0.89)] for a in (-1, 1) for b in (0, 1)]
+tube("cart_leg", None, 0.013, STEEL, cart, 16, segments=legs)
+tube("cart_handle", [(C - 0.3, CF, 0.9), (C - 0.38, CF, 0.94), (C - 0.38, CB, 0.94), (C - 0.3, CB, 0.9)], 0.011, DARK, cart, 16)
+for a in (-1, 1):
+    for y in (CF - 0.045, CB + 0.045):
+        tube("wheel", [(C + a * 0.29 - 0.016, y, 0.16), (C + a * 0.29 + 0.016, y, 0.16)], 0.045, RUBBER, cart, 24)
+# Modelled over the counter line, parked in front of it.
+rig.location = (0.26, -0.72, -0.115)
 
 # Inventory terminal
 
@@ -631,9 +696,76 @@ lamp("lamp_inventory_network", (T + 0.46, -0.39, 0.9402), (T + 0.52, -0.386, 0.9
 waves = [arc((T + 0.49, -0.47, 0.941), r, 30, 150, (0, 1), 12) for r in (0.018, 0.03, 0.042)]
 tube("reader_mark", None, 0.0014, PAPER, reader, 6, segments=waves)
 tube("reader_cord", [(T + 0.49, -0.362, 0.925), (T + 0.49, -0.3, 0.921), (T + 0.44, -0.24, 0.921), (T + 0.3, -0.2, 0.921), (T + 0.08, -0.19, 0.923)], 0.003, RUBBER, term, 8)
-box("clipboard", (0.88, -0.52, 0.916), (1.1, -0.22, 0.92), KICK, term, 0.002)
-box("paper", (0.89, -0.5, 0.9205), (1.09, -0.23, 0.9215), PAPER, term, 0)
-box("clip", (0.95, -0.245, 0.9205), (1.03, -0.22, 0.932), STEEL, term, 0.003)
+badge = group("badge")
+box("card", (T + 0.3, -0.36, 0.9165), (T + 0.39, -0.3, 0.9195), WHITE, badge, 0.0015)
+box("card_band", (T + 0.3005, -0.316, 0.9196), (T + 0.3895, -0.301, 0.92), BANDS[0], badge, 0)
+text("STAFF", (T + 0.345, -0.336, 0.9203), 0.022, INK, badge, "top")
+lanyard = [(T + 0.345, -0.3, 0.919), (T + 0.35, -0.26, 0.919), (T + 0.41, -0.22, 0.919), (T + 0.46, -0.25, 0.919), (T + 0.42, -0.29, 0.919), (T + 0.36, -0.3, 0.919)]
+tube("lanyard", lanyard, 0.003, BANDS[0], badge, 8)
+
+# Counter places
+
+tray("delivery", -0.3, 0.16, -0.34, -0.06, 0.916, LID, counter)
+text("DELIVERY", (-0.07, -0.341, 0.932), 0.028, INK, counter)
+grid("delivery", -0.215, -0.265, 0.923)
+tray("dispensed", 0.83, 1.29, -0.34, -0.06, 0.916, LID, counter)
+text("TO ROOM 2", (1.06, -0.341, 0.932), 0.028, INK, counter)
+grid("out", 0.915, -0.265, 0.923)
+tray("discard", 2.14, 2.44, -0.34, -0.06, 0.916, RED, counter, 0.16)
+text("DISCARD", (2.29, -0.341, 1.0), 0.05, WHITE, counter)
+for i in range(MAX):
+    spot(f"spot_discard_{i + 1}", 2.22 + i % 2 * 0.14, -0.262 + i // 2 % 2 * 0.12, 0.923 + i // 4 * 0.102)
+
+# Receiving site behind a partition
+
+site = group("site")
+PX, DL, DR = 2.96, -1.95, -0.95
+for lo, hi in (((DR, 0), (0, TOP)), ((DL, 2.15), (DR, TOP)), ((-2.5, 0), (DL, TOP))):
+    box("partition", (PX, lo[0], lo[1]), (PX + 0.1, hi[0], hi[1]), WALL, site, 0)
+for y in (DL, DR):
+    box("jamb", (PX - 0.015, y - 0.03, 0), (PX + 0.115, y + 0.03, 2.18), TRIM, site, 0.004)
+box("lintel", (PX - 0.015, DL - 0.03, 2.12), (PX + 0.115, DR + 0.03, 2.18), TRIM, site, 0.004)
+box("sign", (PX - 0.03, DL + 0.1, 2.28), (PX - 0.005, DR - 0.1, 2.5), GREEN, site, 0.004)
+text("TO CLINIC B", (PX - 0.0305, (DL + DR) / 2, 2.39), 0.13, WHITE, site, "left")
+for x in (1.2, 1.9, 2.6):
+    y = -1.45
+    v = [(x, y - 0.06, 0.001), (x + 0.16, y, 0.001), (x, y + 0.06, 0.001), (x + 0.05, y, 0.001)]
+    add("arrow", v, [(0, 1, 3), (3, 1, 2)], GREEN, site)
+box("site_sign", (3.9, -0.03, 2.02), (5.5, -0.005, 2.3), GREEN, site, 0.004)
+text("CLINIC B  RECEIVING", (4.7, -0.0305, 2.16), 0.14, WHITE, site)
+box("bench", (4.35, -0.6, 0.1), (5.9, -0.03, 0.88), FRONT, site, 0.003)
+box("bench_kick", (4.37, -0.55, 0), (5.88, -0.03, 0.1), KICK, site, 0)
+box("bench_top", (4.33, -0.63, 0.88), (5.92, 0, 0.915), STONE, site, 0.005, 4)
+for i in range(3):
+    x = 4.36 + i * 0.515
+    box("bench_front", (x, -0.612, 0.105), (x + 0.505, -0.6, 0.872), FRONT, site, 0.0025)
+    bar_handle("pull", (x + 0.45, -0.612, 0.6), (x + 0.45, -0.612, 0.82), 0.026, 0.005, site)
+tray("accepted", 4.62, 5.08, -0.42, -0.14, 0.916, BANDS[0], site)
+text("ACCEPTED", (4.85, -0.421, 0.932), 0.028, WHITE, site)
+grid("receiver", 4.705, -0.345, 0.923)
+box("site_reader", (5.3, -0.45, 0.916), (5.46, -0.28, 0.94), DARK, site, 0.007, 4)
+box("site_pad", (5.312, -0.438, 0.938), (5.448, -0.292, 0.9425), BLACK, site, 0.002)
+text("BADGE", (5.38, -0.365, 0.9427), 0.03, WHITE, site, "top")
+box("bay", (3.62, -1.62, 0.0005), (4.3, -1.04, 0.001), GREEN, site, 0)
+box("bay_in", (3.65, -1.59, 0.0008), (4.27, -1.07, 0.0014), FLOOR, site, 0)
+text("HANDOVER", (3.96, -1.5, 0.002), 0.1, GREEN, site, "top")
+
+# Batches are built around the origin and placed by the viewer.
+
+for i in range(MAX):
+    b = group(f"batch_{i + 1}")
+    w, d = BW / 2, BD / 2
+    e = 0.0006
+    box("carton", (-w, -d, 0), (w, d, BH), CARTON, b, 0.0015, 2)
+    box("band", (-w - e, -d - e, 0.006), (w + e, d + e, 0.024), BANDS[i % 3], b, 0)
+    text(f"VAX-{i + 1:02}", (-0.006, -d - 0.0008, 0.062), 0.032, INK, b)
+    box("tag", (0.043, -d - e, 0.076), (0.061, -d, 0.094), STEEL, b, 0)
+    text(f"VAX-{i + 1:02}", (0, 0, BH + 0.0006), 0.036, INK, b, "top")
+    t = group(f"dnu_{i + 1}", parent=b)
+    box("sleeve", (-w - 0.002, -d - 0.002, 0.026), (w + 0.002, d + 0.002, 0.046), RED, t, 0)
+    text("DO NOT USE", (0, -d - 0.0026, 0.0355), 0.019, WHITE, t)
+    box("sleeve", (-w * 0.9, -d * 0.9, BH), (w * 0.9, -d * 0.45, BH + 0.0015), RED, t, 0)
+    text("DO NOT USE", (0, -d * 0.67, BH + 0.002), 0.017, WHITE, t, "top")
 
 bpy.ops.export_scene.gltf(
     filepath=str(OUT), export_format="GLB", export_apply=True, export_tangents=True, export_yup=True

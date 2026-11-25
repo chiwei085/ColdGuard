@@ -62,14 +62,24 @@ impl Lab {
                 on: board.relay(),
             })?;
         }
-        let commands = std::mem::take(&mut sim.world_mut().outbox);
+        let commands = sim.world_mut().take_commands();
         for command in commands {
             self.hub.command(&command)?;
+        }
+        // Staff move the box once its departure is confirmed.
+        match self.hub.transit() {
+            0 => sim.apply(&Action::Carry { away: false })?,
+            1 => sim.apply(&Action::Carry { away: true })?,
+            _ => {}
         }
         sim.step()
     }
 
     pub fn fleet(&self) -> Fleet {
-        self.hub.fleet()
+        let mut fleet = self.hub.fleet();
+        for board in &self.boards {
+            fleet.report_mut(board.id).buzzer = board.buzzer();
+        }
+        fleet
     }
 }

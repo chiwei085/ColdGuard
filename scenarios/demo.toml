@@ -3,18 +3,26 @@
 duration_ms = 7_200_000
 snapshot_ms = 1000
 
+[config]
+batches = 4
+
 [[event]]
 at_ms = 0
 action = "relay"
 node = "fridge"
 on = true
 
-# Opening stock.
 [[event]]
 at_ms = 6_000
 action = "scan"
 node = "inventory"
 uid = "04A1B2C3"
+
+[[event]]
+at_ms = 7_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
 
 [[event]]
 at_ms = 7_000
@@ -24,14 +32,26 @@ cmd = "checkin"
 batch = "VAX-01"
 
 [[event]]
-at_ms = 7_000
+at_ms = 8_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 8_000
 action = "operate"
 node = "inventory"
 cmd = "checkin"
 batch = "VAX-02"
 
 [[event]]
-at_ms = 7_000
+at_ms = 9_000
+action = "scan"
+node = "inventory"
+uid = "B1000003"
+
+[[event]]
+at_ms = 9_000
 action = "operate"
 node = "inventory"
 cmd = "checkin"

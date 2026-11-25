@@ -1,0 +1,137 @@
+# Departure refused for receiver, temperature and battery.
+duration_ms = 400_000
+snapshot_ms = 1000
+
+[config]
+batches = 1
+
+[[caption]]
+at_ms = 0
+text = "A batch is packed."
+view = "clinic"
+
+[[caption]]
+at_ms = 29_000
+text = "Refused. The receiver has not confirmed."
+view = "carrier"
+
+[[caption]]
+at_ms = 47_000
+text = "Refused. The box has not been stable for five minutes."
+view = "carrier"
+
+[[caption]]
+at_ms = 345_000
+text = "Refused. The battery is below 20 percent."
+view = "carrier"
+
+[[caption]]
+at_ms = 360_000
+text = "The box and the batch have not moved."
+view = "carrier"
+
+[[event]]
+at_ms = 8_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 10_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 10_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 18_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 18_000
+action = "operate"
+node = "inventory"
+cmd = "load"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 28_000
+action = "scan"
+node = "carrier"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 30_000
+action = "operate"
+node = "carrier"
+cmd = "depart"
+
+[[event]]
+at_ms = 40_000
+action = "operate"
+node = "carrier"
+cmd = "receiver"
+note = "clinic B confirmed"
+
+[[event]]
+at_ms = 48_000
+action = "operate"
+node = "carrier"
+cmd = "depart"
+
+[[event]]
+at_ms = 340_000
+action = "battery"
+node = "carrier"
+level = 0.15
+
+[[event]]
+at_ms = 344_000
+action = "scan"
+node = "carrier"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 346_000
+action = "operate"
+node = "carrier"
+cmd = "depart"
+
+[[check]]
+at_ms = 10_500
+batch = "VAX-01 fridge stored ok"
+
+[[check]]
+at_ms = 18_500
+batch = "VAX-01 carrier stored ok"
+
+[[check]]
+at_ms = 30_500
+refused = "depart receiver not confirmed"
+transit = 0
+
+[[check]]
+at_ms = 40_500
+done = "receiver"
+
+[[check]]
+at_ms = 48_500
+refused = "depart temperature not stable"
+transit = 0
+
+[[check]]
+at_ms = 346_500
+refused = "depart battery"
+transit = 0
+
+[[check]]
+at_ms = 355_000
+batch = "VAX-01 carrier stored ok"

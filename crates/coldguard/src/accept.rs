@@ -1,7 +1,7 @@
 //! Headless acceptance of the firmware in closed loop.
 
 use crate::{board::Board, lab::Lab, toolchain::Toolchain};
-use sim_core::{Action, NodeId, STEP_MS, Scenario, Sensor, Simulation};
+use sim_core::{Action, NodeId, STEP_MS, Scenario, Sensor, Simulation, batch_tag};
 use std::{
     thread::sleep,
     time::{Duration, Instant},
@@ -10,7 +10,7 @@ use std::{
 type Result<T = String> = std::result::Result<T, String>;
 type Case = fn(&Toolchain) -> Result;
 
-const CASES: [(&str, Case); 11] = [
+const CASES: [(&str, Case); 18] = [
     ("S1", pause),
     ("S2", closed_loop),
     ("S3", repeatable),
@@ -22,6 +22,13 @@ const CASES: [(&str, Case); 11] = [
     ("F4", transport),
     ("F5", network_loss),
     ("F5R", unit_reset),
+    ("F2R", damaged_frame),
+    ("F3P", battery_empty),
+    ("F5L", log_full),
+    ("D2S", |t| replay(t, "story")),
+    ("D2E", |t| replay(t, "excursion")),
+    ("D2F", |t| replay(t, "failures")),
+    ("D2R", |t| replay(t, "refusals")),
 ];
 
 const FRIDGE: NodeId = NodeId::Fridge;
@@ -185,6 +192,7 @@ fn repeatable(t: &Toolchain) -> Result {
         s.sim.apply(&Action::Scan {
             node: FRIDGE,
             uid: NURSE.into(),
+            garbled: false,
         })?;
         s.run(90)?;
         s.sim.apply(&Action::Door {
@@ -235,18 +243,21 @@ impl Drop for Net {
 
 impl Net {
     fn start(t: &Toolchain) -> Result<Self> {
-        let sim = simulation(5.0)?;
-        let db = t
-            .tools()
-            .join(format!("accept-{}.sqlite3", std::process::id()));
-        let lab = Lab::start(t, None, &db)?;
-        let mut net = Self { lab, sim, db };
+        let mut net = Self::load(t, simulation(5.0)?)?;
         net.until("all units online", 30, |n| {
             NodeId::ALL
                 .iter()
                 .all(|id| n.lab.fleet().report(*id).online)
         })?;
         Ok(net)
+    }
+
+    fn load(t: &Toolchain, sim: Simulation) -> Result<Self> {
+        let db = t
+            .tools()
+            .join(format!("accept-{}.sqlite3", std::process::id()));
+        let lab = Lab::start(t, None, &db)?;
+        Ok(Self { lab, sim, db })
     }
 
     fn step(&mut self) -> Result<()> {
@@ -306,6 +317,7 @@ impl Net {
         self.act(Action::Scan {
             node,
             uid: NURSE.into(),
+            garbled: false,
         })?;
         self.until("badge", 5, |n| n.lab.fleet().report(node).person == NURSE)
             .map(|_| ())
@@ -314,6 +326,13 @@ impl Net {
     /// Send a command with a fresh badge. Return ok or the refusal.
     fn operate(&mut self, node: NodeId, cmd: &str, batch: &str, note: &str) -> Result<String> {
         self.badge(node)?;
+        if !batch.is_empty() {
+            self.act(Action::Scan {
+                node,
+                uid: batch_tag(batch),
+                garbled: false,
+            })?;
+        }
         self.command(node, cmd, batch, note)
     }
 
@@ -490,21 +509,21 @@ fn fridge_alarms(t: &Toolchain) -> Result {
 fn stock(t: &Toolchain) -> Result {
     let mut n = Net::start(t)?;
     n.run(3)?;
-    let refused = n.command(INVENTORY, "checkin", "MMR-01", "")?;
+    let refused = n.command(INVENTORY, "checkin", "VAX-01", "")?;
     if refused != "badge required" {
         return Err(format!("checkin without badge: {refused}"));
     }
-    for batch in ["MMR-01", "BCG-02"] {
+    for batch in ["VAX-01", "VAX-02"] {
         n.expect(INVENTORY, "checkin", batch, "", "ok")?;
     }
     n.bias(FRIDGE, 4.0)?;
-    let lock = n.until("batches locked", 5, |n| n.status("MMR-01").2 == "dnu")?;
+    let lock = n.until("batches locked", 5, |n| n.status("VAX-01").2 == "dnu")?;
     n.bias(FRIDGE, 0.0)?;
     n.run(10)?;
-    n.wait_status("BCG-02", "fridge", "stored", "dnu")?;
-    n.expect(INVENTORY, "checkout", "MMR-01", "", "do not use")?;
-    n.expect(INVENTORY, "release", "MMR-01", "", "basis required")?;
-    n.expect(INVENTORY, "release", "MMR-01", "maker letter 12", "ok")?;
+    n.wait_status("VAX-02", "fridge", "stored", "dnu")?;
+    n.expect(INVENTORY, "checkout", "VAX-01", "", "do not use")?;
+    n.expect(INVENTORY, "release", "VAX-01", "", "basis required")?;
+    n.expect(INVENTORY, "release", "VAX-01", "maker letter 12", "ok")?;
 
     let boot = n.lab.fleet().inventory.boot_id;
     n.lab.boards[2].reset()?;
@@ -512,15 +531,15 @@ fn stock(t: &Toolchain) -> Result {
         n.lab.fleet().inventory.boot_id > boot
     })?;
     n.run(8)?;
-    n.wait_status("BCG-02", "fridge", "stored", "dnu")?;
-    n.expect(INVENTORY, "checkout", "MMR-01", "", "ok")?;
-    n.expect(INVENTORY, "checkout", "BCG-02", "", "do not use")?;
+    n.wait_status("VAX-02", "fridge", "stored", "dnu")?;
+    n.expect(INVENTORY, "checkout", "VAX-01", "", "ok")?;
+    n.expect(INVENTORY, "checkout", "VAX-02", "", "do not use")?;
     n.act(Action::Sensor {
         node: FRIDGE,
         state: Sensor::Disconnected,
     })?;
     n.run(5)?;
-    n.expect(INVENTORY, "checkin", "MMR-01", "", "sensor fault")?;
+    n.expect(INVENTORY, "checkin", "VAX-01", "", "sensor fault")?;
     Ok(format!(
         "locked in {lock} s, kept after recovery and reset, released with basis"
     ))
@@ -571,8 +590,8 @@ fn power(t: &Toolchain) -> Result {
 fn transport(t: &Toolchain) -> Result {
     let mut n = Net::start(t)?;
     n.run(3)?;
-    n.expect(INVENTORY, "checkin", "MMR-01", "", "ok")?;
-    n.expect(INVENTORY, "load", "MMR-01", "", "ok")?;
+    n.expect(INVENTORY, "checkin", "VAX-01", "", "ok")?;
+    n.expect(INVENTORY, "load", "VAX-01", "", "ok")?;
     n.expect(CARRIER, "depart", "", "", "receiver not confirmed")?;
     n.expect(CARRIER, "receiver", "", "clinic B ready", "ok")?;
     n.bias(CARRIER, -4.0)?;
@@ -592,17 +611,17 @@ fn transport(t: &Toolchain) -> Result {
     })?;
     n.run(2)?;
     // The cold reading locked the loaded batch.
-    n.wait_status("MMR-01", "carrier", "stored", "dnu")?;
-    n.expect(INVENTORY, "release", "MMR-01", "sensor test", "ok")?;
+    n.wait_status("VAX-01", "carrier", "stored", "dnu")?;
+    n.expect(INVENTORY, "release", "VAX-01", "sensor test", "ok")?;
     n.expect(CARRIER, "depart", "", "", "ok")?;
-    n.wait_status("MMR-01", "carrier", "transit", "ok")?;
-    n.expect(INVENTORY, "checkout", "MMR-01", "", "transit")?;
+    n.wait_status("VAX-01", "carrier", "transit", "ok")?;
+    n.expect(INVENTORY, "checkout", "VAX-01", "", "transit")?;
     n.run(30)?;
     n.expect(CARRIER, "arrive", "", "", "ok")?;
-    n.wait_status("MMR-01", "carrier", "pending", "ok")?;
-    n.expect(INVENTORY, "checkout", "MMR-01", "", "pending")?;
-    n.expect(INVENTORY, "accept", "MMR-01", "log checked", "ok")?;
-    n.expect(INVENTORY, "checkout", "MMR-01", "", "ok")?;
+    n.wait_status("VAX-01", "carrier", "pending", "ok")?;
+    n.expect(INVENTORY, "checkout", "VAX-01", "", "pending")?;
+    n.expect(INVENTORY, "accept", "VAX-01", "log checked", "ok")?;
+    n.expect(INVENTORY, "checkout", "VAX-01", "", "ok")?;
     for cmd in ["depart", "arrive"] {
         let complete = n.bodies(CARRIER, "op").iter().any(|o| {
             o["cmd"] == cmd
@@ -621,7 +640,7 @@ fn transport(t: &Toolchain) -> Result {
 fn network_loss(t: &Toolchain) -> Result {
     let mut n = Net::start(t)?;
     n.run(3)?;
-    n.expect(INVENTORY, "checkin", "MMR-01", "", "ok")?;
+    n.expect(INVENTORY, "checkin", "VAX-01", "", "ok")?;
     n.act(Action::Network {
         node: FRIDGE,
         up: false,
@@ -634,7 +653,7 @@ fn network_loss(t: &Toolchain) -> Result {
     if !(10..=22).contains(&lost) {
         return Err(format!("offline after {lost} s"));
     }
-    n.expect(INVENTORY, "checkout", "MMR-01", "", "storage offline")?;
+    n.expect(INVENTORY, "checkout", "VAX-01", "", "storage offline")?;
     // Local control keeps recording.
     n.bias(FRIDGE, 4.0)?;
     n.run(5)?;
@@ -653,7 +672,7 @@ fn network_loss(t: &Toolchain) -> Result {
     n.until("backlog confirmed", 20, |n| {
         n.lab.fleet().fridge.backlog == 0
     })?;
-    n.wait_status("MMR-01", "fridge", "stored", "dnu")?;
+    n.wait_status("VAX-01", "fridge", "stored", "dnu")?;
     // Losing the recorder itself only delays confirmation.
     n.act(Action::Network {
         node: INVENTORY,
@@ -702,4 +721,122 @@ fn unit_reset(t: &Toolchain) -> Result {
         n.lab.fleet().fridge.backlog == 0
     })?;
     Ok("unconfirmed records survive a reset".into())
+}
+
+fn damaged_frame(t: &Toolchain) -> Result {
+    let mut n = Net::start(t)?;
+    n.act(Action::Scan {
+        node: INVENTORY,
+        uid: NURSE.into(),
+        garbled: true,
+    })?;
+    n.until("damaged frame recorded", 10, |n| {
+        n.bodies(INVENTORY, "scan")
+            .iter()
+            .any(|b| b["error"] == "bad frame")
+    })?;
+    if !n.lab.fleet().inventory.person.is_empty() {
+        return Err("damaged frame accepted".into());
+    }
+    n.badge(INVENTORY)?;
+    Ok("damaged frame dropped and recorded, next frame read".into())
+}
+
+fn battery_empty(t: &Toolchain) -> Result {
+    let mut n = Net::start(t)?;
+    let boot = n.lab.fleet().fridge.boot_id;
+    n.act(Action::Mains {
+        node: FRIDGE,
+        on: false,
+    })?;
+    n.act(Action::Battery {
+        node: FRIDGE,
+        level: 0.0,
+    })?;
+    n.until("unit off", 30, |n| !n.lab.fleet().fridge.online)?;
+    if n.sim.world().fridge.powered || n.lab.boards[0].relay() {
+        return Err("unit still powered".into());
+    }
+    n.act(Action::Mains {
+        node: FRIDGE,
+        on: true,
+    })?;
+    n.until("unit restarted", 30, |n| {
+        let r = n.lab.fleet().fridge;
+        r.online && r.boot_id == boot + 1
+    })?;
+    Ok("off without power, restarted with mains".into())
+}
+
+/// The host stops storing records until the node log is full.
+fn log_full(t: &Toolchain) -> Result {
+    use std::sync::atomic::Ordering;
+    let mut n = Net::start(t)?;
+    n.run(3)?;
+    n.expect(INVENTORY, "checkin", "VAX-01", "", "ok")?;
+    n.lab.hub.reject.store(true, Ordering::Relaxed);
+    for _ in 0..4600 {
+        n.act(Action::Scan {
+            node: INVENTORY,
+            uid: NURSE.into(),
+            garbled: false,
+        })?;
+        for _ in 0..60 {
+            n.step()?;
+        }
+        if n.alarm(INVENTORY, "log_full") {
+            break;
+        }
+    }
+    n.until("log alarm", 5, |n| n.alarm(INVENTORY, "log_full"))?;
+    let held = n.lab.fleet().inventory.backlog;
+    if held < 4096 {
+        return Err(format!("full at {held} records"));
+    }
+    n.badge(INVENTORY)?;
+    n.act(Action::Scan {
+        node: INVENTORY,
+        uid: batch_tag("VAX-01"),
+        garbled: false,
+    })?;
+    n.act(Action::Operate {
+        node: INVENTORY,
+        cmd: "checkout".into(),
+        batch: "VAX-01".into(),
+        to: String::new(),
+        note: String::new(),
+    })?;
+    n.run(5)?;
+    n.wait_status("VAX-01", "fridge", "stored", "ok")?;
+    n.lab.hub.reject.store(false, Ordering::Relaxed);
+    n.until("backlog confirmed", 600, |n| {
+        n.lab.fleet().inventory.backlog == 0
+    })?;
+    n.until("log alarm cleared", 5, |n| !n.alarm(INVENTORY, "log_full"))?;
+    n.expect(INVENTORY, "checkout", "VAX-01", "", "ok")?;
+    Ok(format!(
+        "refused with {held} unconfirmed records, recovered after confirmation"
+    ))
+}
+
+fn replay(t: &Toolchain, name: &str) -> Result {
+    let path = t.root.join(format!("scenarios/{name}.toml"));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
+    let mut n = Net::load(t, Simulation::new(Scenario::parse(&text)?)?)?;
+    let mut open = n.sim.scenario().checks.clone();
+    let count = open.len();
+    while !n.sim.finished() {
+        let begin = Instant::now();
+        for _ in 0..100 {
+            n.step()?;
+        }
+        let (now, fleet) = (n.sim.world().time_ms, n.lab.fleet());
+        open.retain(|c| now < c.at_ms || !c.holds(&fleet));
+        if let Some(c) = open.iter().find(|c| c.deadline() <= now) {
+            let recent: Vec<_> = fleet.events.iter().rev().take(4).collect();
+            return Err(format!("{c:?} failed. Recent: {recent:?}"));
+        }
+        sleep(Duration::from_millis(10).saturating_sub(begin.elapsed()));
+    }
+    Ok(format!("{count} checks hold"))
 }

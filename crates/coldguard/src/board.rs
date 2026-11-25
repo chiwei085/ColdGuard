@@ -90,6 +90,10 @@ impl Board {
         self.powered && self.driven[0] == Some(true)
     }
 
+    pub fn buzzer(&self) -> bool {
+        self.powered && self.driven[1] == Some(true)
+    }
+
     /// Apply the world to the pins, then let the chip run one quantum.
     pub fn begin(&mut self, node: &Node) -> Result {
         let io = |e: std::io::Error| e.to_string();
@@ -107,7 +111,11 @@ impl Board {
         if node.scan_count > self.scans
             && let Some(uid) = &node.last_scan
         {
-            self.cosim.uart(&tag_frame(uid)).map_err(io)?;
+            let mut frame = tag_frame(uid);
+            if node.scan_garbled {
+                frame[4] ^= 1;
+            }
+            self.cosim.uart(&frame).map_err(io)?;
         }
         self.scans = node.scan_count;
         self.cosim.grant(QUANTUM_NS).map_err(io)

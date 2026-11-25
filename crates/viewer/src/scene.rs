@@ -2,8 +2,11 @@
 
 use crate::{
     Live,
+    batches::{self, Spots},
+    display::Displays,
+    hud::{Hint, hint},
     link::Link,
-    stock::{PanelOpen, ScreenImage},
+    stock::{Panel, PanelOpen, ScreenImage},
 };
 use bevy::{
     anti_alias::{
@@ -28,7 +31,10 @@ pub fn plugin(app: &mut App) {
     app.insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
         .add_systems(Startup, (model, lights, camera))
-        .add_systems(Update, (hinges, lamps, interior, glow, fan, orbit))
+        .add_systems(
+            Update,
+            (hinges, lamps, interior, glow, room, fan, rig, orbit),
+        )
         .add_observer(bind);
 }
 
@@ -53,6 +59,9 @@ enum LampKind {
     Power,
     Network,
     Screen,
+    Display,
+    /// One of five bars, counted from 1.
+    Battery(u8),
 }
 
 #[derive(Component)]
@@ -61,6 +70,41 @@ struct Interior(NodeId);
 /// Light strip inside the fridge.
 #[derive(Component, Clone)]
 struct FridgeGlow;
+
+/// Ceiling panels.
+#[derive(Component, Clone)]
+struct RoomGlow;
+
+/// Ceiling light of the clinic and its intensity.
+#[derive(Component)]
+struct RoomLight(f32);
+
+/// The box on its trolley.
+#[derive(Component, Default)]
+struct Rig {
+    rest: Option<Vec3>,
+    travel: f32,
+}
+
+/// Way of the trolley from its rest, through the door to the receiver.
+const PATH: [Vec3; 4] = [
+    vec3(0.0, 0.0, 0.0),
+    vec3(0.0, 0.0, 0.41),
+    vec3(3.34, 0.0, 0.41),
+    vec3(3.34, 0.0, 0.29),
+];
+
+fn along(travel: f32) -> Vec3 {
+    let mut left = travel * PATH.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>();
+    for w in PATH.windows(2) {
+        let length = w[0].distance(w[1]);
+        if left <= length {
+            return w[0].lerp(w[1], left / length);
+        }
+        left -= length;
+    }
+    PATH[3]
+}
 
 #[derive(Component)]
 struct Fan;
@@ -71,7 +115,43 @@ struct Orbit {
     yaw: f32,
     pitch: f32,
     distance: f32,
+    view: usize,
+    /// The view is still being reached.
+    moving: bool,
 }
+
+struct View {
+    name: &'static str,
+    focus: Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    /// Moves with the box.
+    follow: bool,
+}
+
+const fn view(name: &'static str, focus: Vec3, yaw: f32, pitch: f32, distance: f32) -> View {
+    View {
+        name,
+        focus,
+        yaw,
+        pitch,
+        distance,
+        follow: false,
+    }
+}
+
+const VIEWS: [View; 6] = [
+    view("clinic", vec3(0.0, 1.06, 0.3), 0.2, 0.06, 4.9),
+    view("fridge", vec3(-0.7, 1.2, 0.5), 0.2, 0.06, 2.9),
+    view("carrier", vec3(0.5, 1.02, 0.9), 0.15, 0.25, 2.2),
+    view("terminal", vec3(1.6, 1.16, 0.25), 0.0, 0.12, 1.7),
+    View {
+        follow: true,
+        ..view("box", vec3(0.6, 1.15, 0.8), 0.0, 0.12, 3.4)
+    },
+    view("receiver", vec3(4.5, 1.15, 0.6), -0.12, 0.12, 3.6),
+];
 
 pub fn node(frame: &sim_core::Frame, id: NodeId) -> &SimNode {
     match id {
@@ -101,6 +181,7 @@ pub fn badge(node: NodeId) -> Action {
     Action::Scan {
         node,
         uid: "04A1B2C3".into(),
+        garbled: false,
     }
 }
 
@@ -118,6 +199,7 @@ fn bind(
     children: Query<&Children>,
     surfaces: Query<(&GltfMaterialName, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut spots: ResMut<Spots>,
 ) {
     for entity in children.iter_descendants(ready.entity) {
         if let Ok((name, handle)) = surfaces.get(entity) {
@@ -135,6 +217,15 @@ fn bind(
         let Ok(name) = names.get(entity) else {
             continue;
         };
+        if batches::bind(entity, name, &mut commands, &mut spots) {
+            continue;
+        }
+        if let Some(text) = hint(name) {
+            commands
+                .entity(entity)
+                .observe(move |_: On<PointerOver>, mut hint: ResMut<Hint>| hint.0 = Some(text))
+                .observe(|_: On<PointerOut>, mut hint: ResMut<Hint>| hint.0 = None);
+        }
         let hinge = |node, axis, open| Hinge {
             node,
             axis,
@@ -160,7 +251,18 @@ fn bind(
             "fridge_fan" => {
                 commands.entity(entity).insert(Fan);
             }
-            "reader" => {
+            "carrier_rig" => {
+                commands.entity(entity).insert(Rig::default());
+            }
+            "glow_ceiling" => own_materials(
+                entity,
+                RoomGlow,
+                &mut commands,
+                &children,
+                &surfaces,
+                &mut materials,
+            ),
+            "reader" | "badge" => {
                 commands
                     .entity(entity)
                     .observe(|_: On<PointerClick>, link: Res<Link>| link.act(scan()));
@@ -182,7 +284,13 @@ fn bind(
                 let Some(lamp) = lamp(other) else { continue };
                 if matches!(lamp.kind, LampKind::Screen) {
                     commands.entity(entity).observe(
-                        |_: On<PointerClick>, mut open: ResMut<PanelOpen>| open.0 = !open.0,
+                        |_: On<PointerClick>, mut open: ResMut<PanelOpen>| {
+                            open.0 = if open.0 == Panel::Closed {
+                                Panel::All
+                            } else {
+                                Panel::Closed
+                            };
+                        },
                     );
                 }
                 own_materials(
@@ -199,7 +307,10 @@ fn bind(
 }
 
 fn lamp(name: &str) -> Option<Lamp> {
-    let (node, kind) = name.strip_prefix("lamp_")?.split_once('_')?;
+    let (node, kind) = match name.strip_prefix("display_") {
+        Some(node) => (node, "display"),
+        None => name.strip_prefix("lamp_")?.split_once('_')?,
+    };
     Some(Lamp {
         node: match node {
             "fridge" => NodeId::Fridge,
@@ -212,6 +323,10 @@ fn lamp(name: &str) -> Option<Lamp> {
             "power" => LampKind::Power,
             "network" => LampKind::Network,
             "screen" => LampKind::Screen,
+            "display" => LampKind::Display,
+            other if other.starts_with("battery") => {
+                LampKind::Battery(other["battery".len()..].parse().ok()?)
+            }
             _ => return None,
         },
     })
@@ -250,6 +365,8 @@ fn toggle(id: NodeId) -> impl Fn(On<PointerClick>, Res<Live>, Res<Link>) {
     }
 }
 
+const CEILING: f32 = 48_000.0;
+
 /// The window sets the main direction. Panels and interior lamps fill.
 fn lights(mut commands: Commands) {
     commands.spawn((
@@ -284,18 +401,36 @@ fn lights(mut commands: Commands) {
         },
         Transform::from_xyz(-2.0, 1.75, 2.3).looking_at(vec3(0.3, 0.9, 0.4), Vec3::Y),
     ));
-    for x in [-0.9, 1.9] {
-        commands.spawn((
+    for x in [-0.9, 1.9, 4.6] {
+        let mut light = commands.spawn((
             RectLight {
                 color: Color::srgb(1.0, 0.97, 0.92),
-                intensity: 48_000.0,
+                intensity: CEILING,
                 width: 1.2,
                 height: 0.6,
                 range: 9.0,
             },
             Transform::from_xyz(x, 2.76, 2.0).looking_to(Vec3::NEG_Y, Vec3::Z),
         ));
+        // The receiver has its own supply.
+        if x < 3.0 {
+            light.insert(RoomLight(CEILING));
+        }
     }
+    commands.spawn((
+        SpotLight {
+            color: Color::srgb(1.0, 0.96, 0.9),
+            intensity: 420_000.0,
+            range: 9.0,
+            radius: 0.4,
+            inner_angle: 0.5,
+            outer_angle: 1.0,
+            shadow_maps_enabled: true,
+            soft_shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 2.7, 3.4).looking_at(vec3(4.7, 0.9, 0.3), Vec3::Y),
+    ));
     commands.spawn((
         PointLight {
             intensity: 0.0,
@@ -427,17 +562,21 @@ fn camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             ..Bloom::NATURAL
         },
         Orbit {
-            focus: vec3(-0.15, 1.06, 0.3),
-            yaw: 0.2,
-            pitch: 0.06,
-            distance: 4.75,
+            focus: VIEWS[0].focus,
+            yaw: VIEWS[0].yaw,
+            pitch: VIEWS[0].pitch,
+            distance: VIEWS[0].distance,
+            view: 0,
+            moving: false,
         },
         Transform::default(),
     ));
 }
 
 fn hinges(live: Res<Live>, time: Res<Time>, mut hinges: Query<(&mut Hinge, &mut Transform)>) {
-    let Some(frame) = &live.0 else { return };
+    let Some(frame) = live.0.as_ref().filter(|f| !f.paused) else {
+        return;
+    };
     for (mut hinge, mut transform) in &mut hinges {
         let open = node(frame, hinge.node)
             .thermal
@@ -454,6 +593,7 @@ fn lamps(
     live: Res<Live>,
     time: Res<Time>,
     screen: Res<ScreenImage>,
+    displays: Res<Displays>,
     lamps: Query<(&Lamp, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -471,9 +611,7 @@ fn lamps(
             match lamp.kind {
                 _ if !n.powered => Color::BLACK,
                 // The unit's own alarm blinks.
-                LampKind::Temperature
-                    if report.is_some_and(|r| r.online && !r.alarms.is_empty()) =>
-                {
+                LampKind::Temperature if report.is_some_and(|r| r.buzzer) => {
                     if time.elapsed_secs() % 0.8 < 0.4 {
                         Color::srgb(1.0, 0.12, 0.08)
                     } else {
@@ -487,7 +625,13 @@ fn lamps(
                     n.mains || n.battery_level > 0.2,
                     Color::srgb(0.1, 0.6, 0.75),
                 ),
-                LampKind::Screen => Color::WHITE,
+                LampKind::Screen | LampKind::Display => Color::WHITE,
+                LampKind::Battery(bar) if n.battery_level * 5.0 < f64::from(bar) - 0.99 => {
+                    Color::srgb(0.03, 0.03, 0.03)
+                }
+                LampKind::Battery(_) if n.mains => Color::srgb(0.15, 0.8, 0.4),
+                LampKind::Battery(_) if n.battery_level > 0.2 => Color::srgb(1.0, 0.6, 0.1),
+                LampKind::Battery(_) => Color::srgb(1.0, 0.12, 0.08),
                 LampKind::Network => on(
                     report.map_or(n.network_up, |r| r.online),
                     Color::srgb(0.2, 0.9, 0.4),
@@ -495,11 +639,19 @@ fn lamps(
             }
         });
         if let Some(mut material) = materials.get_mut(&handle.0) {
-            if matches!(lamp.kind, LampKind::Screen) {
+            let image = match lamp.kind {
+                LampKind::Screen => Some(screen.0.clone()),
+                LampKind::Display => displays.image(lamp.node),
+                _ => None,
+            };
+            if image.is_some() {
                 material.base_color = Color::BLACK;
                 material.base_color_texture = None;
-                material.emissive_texture = Some(screen.0.clone());
-                material.emissive = color.to_linear();
+                // Reflections would wash out the text.
+                material.reflectance = 0.0;
+                material.perceptual_roughness = 1.0;
+                material.emissive_texture = image;
+                material.emissive = color.to_linear() * 2.0;
                 continue;
             }
             material.base_color = color;
@@ -534,6 +686,46 @@ fn glow(
     }
 }
 
+/// The ceiling lights fail with the mains.
+fn room(
+    live: Res<Live>,
+    mut lights: Query<(&RoomLight, &mut RectLight)>,
+    panels: Query<&MeshMaterial3d<StandardMaterial>, With<RoomGlow>>,
+    mut environment: Query<&mut GeneratedEnvironmentMapLight>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let on = live.0.as_ref().is_none_or(|f| f.world.fridge.mains);
+    for (full, mut light) in &mut lights {
+        light.intensity = if on { full.0 } else { 0.0 };
+    }
+    for mut light in &mut environment {
+        light.intensity = if on { 430.0 } else { 230.0 };
+    }
+    for handle in &panels {
+        if let Some(mut material) = materials.get_mut(&handle.0) {
+            material.emissive = LinearRgba::WHITE * if on { 5.0 } else { 0.05 };
+        }
+    }
+}
+
+fn rig(live: Res<Live>, time: Res<Time>, mut rigs: Query<(&mut Rig, &mut Transform)>) {
+    let Some(f) = live.0.as_ref().filter(|f| !f.paused) else {
+        return;
+    };
+    let goal = f.world.travel as f32;
+    for (mut rig, mut transform) in &mut rigs {
+        // Smooth between snapshots. A reset does not roll back visibly.
+        let blend = if goal < rig.travel - 0.2 {
+            1.0
+        } else {
+            1.0 - (-10.0 * time.delta_secs()).exp()
+        };
+        rig.travel += (goal - rig.travel) * blend;
+        let rest = *rig.rest.get_or_insert(transform.translation);
+        transform.translation = rest + along(rig.travel);
+    }
+}
+
 fn fan(live: Res<Live>, time: Res<Time>, mut fans: Query<&mut Transform, With<Fan>>) {
     let cooling = live
         .0
@@ -549,20 +741,54 @@ fn fan(live: Res<Live>, time: Res<Time>, mut fans: Query<&mut Transform, With<Fa
 }
 
 fn orbit(
-    buttons: Res<ButtonInput<MouseButton>>,
-    motion: Res<AccumulatedMouseMotion>,
-    scroll: Res<AccumulatedMouseScroll>,
+    (buttons, keys): (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
+    (motion, scroll): (Res<AccumulatedMouseMotion>, Res<AccumulatedMouseScroll>),
+    time: Res<Time>,
+    live: Res<Live>,
+    rigs: Query<&Rig>,
     mut cameras: Query<(&mut Orbit, &mut Transform)>,
+    mut told: Local<Option<u64>>,
 ) {
+    let caption = live.0.as_ref().and_then(|f| f.caption.as_ref());
+    let spoken = caption.map(|c| c.at_ms);
+    let asked = if *told != spoken {
+        *told = spoken;
+        caption.and_then(|c| VIEWS.iter().position(|v| v.name == c.view))
+    } else {
+        None
+    };
+    let offset = rigs.iter().next().map_or(Vec3::ZERO, |r| along(r.travel));
     for (mut o, mut transform) in &mut cameras {
+        if let Some(view) = asked {
+            o.view = view;
+            o.moving = true;
+        }
+        if keys.just_pressed(KeyCode::KeyV) {
+            o.view = (o.view + 1) % VIEWS.len();
+            o.moving = true;
+        }
+        let view = &VIEWS[o.view];
+        let blend = 1.0 - (-3.0 * time.delta_secs()).exp();
+        let focus = view.focus + if view.follow { offset } else { Vec3::ZERO };
+        o.focus = o.focus.lerp(focus, blend);
         if buttons.pressed(MouseButton::Right) {
             o.yaw -= motion.delta.x * 0.005;
             o.pitch += motion.delta.y * 0.005;
+            o.moving = false;
+        }
+        if scroll.delta.y != 0.0 {
+            o.distance *= 1.0 - scroll.delta.y * 0.08;
+            o.moving = false;
+        }
+        if o.moving {
+            o.yaw += (view.yaw - o.yaw) * blend;
+            o.pitch += (view.pitch - o.pitch) * blend;
+            o.distance += (view.distance - o.distance) * blend;
         }
         // Keep the camera inside the open side of the room.
         o.yaw = o.yaw.clamp(-0.4, 0.6);
-        o.pitch = o.pitch.clamp(0.0, 0.33);
-        o.distance = (o.distance * (1.0 - scroll.delta.y * 0.08)).clamp(1.2, 5.0);
+        o.pitch = o.pitch.clamp(0.0, 0.45);
+        o.distance = o.distance.clamp(1.0, 5.1);
         let direction = Quat::from_euler(EulerRot::YXZ, o.yaw, -o.pitch, 0.0) * Vec3::Z;
         *transform = Transform::from_translation(o.focus + direction * o.distance)
             .looking_at(o.focus, Vec3::Y);

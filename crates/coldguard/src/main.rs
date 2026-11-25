@@ -50,6 +50,12 @@ enum Command {
     Sim { scenario: PathBuf },
     /// Accept the firmware in closed loop. All cases by default.
     Accept { cases: Vec<String> },
+    /// Print stored records, one JSON object per line.
+    Records {
+        /// Only the latest session.
+        #[arg(long)]
+        latest: bool,
+    },
     /// Run a scenario in real time with the 3D viewer.
     Demo {
         #[arg(default_value = "scenarios/demo.toml")]
@@ -63,6 +69,12 @@ enum Command {
         /// Save the view after 8 seconds and exit.
         #[arg(long)]
         screenshot: Option<PathBuf>,
+        /// Simulated seconds of the pictures instead.
+        #[arg(long, value_delimiter = ',', requires = "screenshot")]
+        at: Vec<u64>,
+        /// Initial speed.
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
     },
 }
 
@@ -85,6 +97,8 @@ fn demo(
     headless: bool,
     firmware: bool,
     shot: Option<&Path>,
+    at: &[u64],
+    speed: f64,
 ) -> Result<(), Box<dyn Error>> {
     let scenario = load_scenario(path)?;
     if firmware {
@@ -92,7 +106,7 @@ fn demo(
     }
     let units = firmware.then_some(t);
     if headless {
-        return live::serve(scenario, units, || false);
+        return live::serve(scenario, units, speed, || false);
     }
     // Build first so the server never waits for the compiler.
     let cargo = t.cargo_bin("cargo").ok_or("cargo not found")?;
@@ -106,12 +120,19 @@ fn demo(
     let mut viewer = std::process::Command::new(t.root.join("target/debug/viewer"));
     if let Some(path) = shot {
         viewer.arg("--screenshot").arg(std::path::absolute(path)?);
+        viewer.args(at.iter().map(u64::to_string));
     }
     let mut viewer = viewer.spawn()?;
-    let result = live::serve(scenario, units, || !matches!(viewer.try_wait(), Ok(None)));
+    let result = live::serve(scenario, units, speed, || {
+        !matches!(viewer.try_wait(), Ok(None))
+    });
     let _ = viewer.kill();
     let _ = viewer.wait();
     result
+}
+
+fn records(t: &Toolchain) -> PathBuf {
+    t.tools().join("records.sqlite3")
 }
 
 fn sim(path: &Path) -> Result<(), Box<dyn Error>> {
@@ -158,7 +179,22 @@ fn run() -> Result<bool, Box<dyn Error>> {
             headless,
             no_firmware,
             screenshot,
-        } => demo(&t, &scenario, headless, !no_firmware, screenshot.as_deref()).map(|()| true),
+            at,
+            speed,
+        } => demo(
+            &t,
+            &scenario,
+            headless,
+            !no_firmware,
+            screenshot.as_deref(),
+            &at,
+            speed,
+        )
+        .map(|()| true),
+        Command::Records { latest } => {
+            hub::export(&records(&t), latest, &mut io::stdout().lock())?;
+            Ok(true)
+        }
         Command::Accept { cases } => {
             prepare(&t)?;
             Ok(accept::run(&t, &cases)?)

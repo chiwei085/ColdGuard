@@ -1,0 +1,259 @@
+# Excursion, quarantine, review, release and discard.
+duration_ms = 640_000
+snapshot_ms = 1000
+
+[config]
+ambient_c = 35.0
+batches = 2
+
+[config.fridge]
+initial_c = 5.0
+heat_capacity_j_per_k = 10_000.0
+closed_w_per_k = 1.5
+open_w_per_k = 15.0
+cooling_w = 150.0
+probe_tau_s = 60.0
+
+[[caption]]
+at_ms = 0
+text = "Two batches are stored."
+view = "clinic"
+
+[[caption]]
+at_ms = 20_000
+text = "The door is left open on a hot day."
+view = "fridge"
+
+[[caption]]
+at_ms = 140_000
+text = "The first reading outside 2 to 8 C locks every batch."
+view = "fridge"
+
+[[caption]]
+at_ms = 210_000
+text = "The door is closed and the fridge recovers."
+view = "fridge"
+
+[[caption]]
+at_ms = 217_000
+text = "Use is refused."
+view = "terminal"
+
+[[caption]]
+at_ms = 229_000
+text = "Locked batches move to the quarantine basket and stay cold."
+view = "fridge"
+
+[[caption]]
+at_ms = 570_000
+text = "The temperature is back. The lock stays."
+view = "fridge"
+
+[[caption]]
+at_ms = 581_000
+text = "A release needs a person and a basis."
+view = "terminal"
+
+[[caption]]
+at_ms = 590_000
+text = "One batch is released. One is discarded."
+view = "clinic"
+
+[[event]]
+at_ms = 8_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 9_000
+action = "door"
+node = "fridge"
+open = true
+
+[[event]]
+at_ms = 10_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 10_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 13_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 13_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-02"
+
+[[event]]
+at_ms = 210_000
+action = "door"
+node = "fridge"
+open = false
+
+[[event]]
+at_ms = 216_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 218_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 218_000
+action = "operate"
+node = "inventory"
+cmd = "checkout"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 228_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 230_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 230_000
+action = "operate"
+node = "inventory"
+cmd = "quarantine"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 234_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 234_000
+action = "operate"
+node = "inventory"
+cmd = "quarantine"
+batch = "VAX-02"
+
+[[event]]
+at_ms = 580_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 582_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 582_000
+action = "operate"
+node = "inventory"
+cmd = "release"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 590_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 590_000
+action = "operate"
+node = "inventory"
+cmd = "release"
+batch = "VAX-01"
+note = "maker confirmed stable"
+
+[[event]]
+at_ms = 598_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 598_000
+action = "operate"
+node = "inventory"
+cmd = "discard"
+batch = "VAX-02"
+note = "maker rejected"
+
+[[check]]
+at_ms = 11_000
+batch = "VAX-01 fridge stored ok"
+
+[[check]]
+at_ms = 14_000
+batch = "VAX-02 fridge stored ok"
+
+[[check]]
+at_ms = 25_000
+within_ms = 180000
+alarm = "fridge excursion"
+
+[[check]]
+at_ms = 26_000
+within_ms = 182000
+batch = "VAX-01 fridge stored dnu"
+
+[[check]]
+at_ms = 26_000
+within_ms = 182000
+batch = "VAX-02 fridge stored dnu"
+
+[[check]]
+at_ms = 218_500
+refused = "checkout VAX-01 do not use"
+
+[[check]]
+at_ms = 230_500
+batch = "VAX-01 quarantine stored dnu"
+
+[[check]]
+at_ms = 234_500
+batch = "VAX-02 quarantine stored dnu"
+
+[[check]]
+at_ms = 240_000
+within_ms = 330000
+no_alarm = "fridge excursion"
+
+[[check]]
+at_ms = 571_000
+batch = "VAX-01 quarantine stored dnu"
+no_alarm = "fridge excursion"
+
+[[check]]
+at_ms = 582_500
+refused = "release VAX-01 basis required"
+
+[[check]]
+at_ms = 590_500
+batch = "VAX-01 fridge stored ok"
+
+[[check]]
+at_ms = 598_500
+batch = "VAX-02 discard stored discarded"

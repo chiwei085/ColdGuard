@@ -1,0 +1,83 @@
+# Compressor without cooling, then a freezing reading.
+duration_ms = 420_000
+snapshot_ms = 1000
+
+[config]
+ambient_c = 30.0
+batches = 1
+
+[config.fridge]
+initial_c = 5.6
+heat_capacity_j_per_k = 40_000.0
+closed_w_per_k = 1.5
+open_w_per_k = 15.0
+cooling_w = 150.0
+probe_tau_s = 60.0
+
+[[caption]]
+at_ms = 0
+text = "The compressor runs but the fridge does not cool."
+view = "fridge"
+
+[[caption]]
+at_ms = 306_000
+text = "After 300 seconds without a drop the fridge reports failed cooling."
+view = "fridge"
+
+[[caption]]
+at_ms = 345_000
+text = "A reading at 0 C or below is a separate freeze alarm. Cooling stops."
+view = "fridge"
+
+[[caption]]
+at_ms = 380_000
+text = "A lost sensor is a fault, not a temperature."
+view = "fridge"
+
+[[event]]
+at_ms = 0
+action = "cooling"
+node = "fridge"
+efficiency = 0.0
+
+[[event]]
+at_ms = 330_000
+action = "cooling"
+node = "fridge"
+efficiency = 1.0
+
+[[event]]
+at_ms = 345_000
+action = "sensor"
+node = "fridge"
+state = { biased = -7.0 }
+
+[[event]]
+at_ms = 380_000
+action = "sensor"
+node = "fridge"
+state = "disconnected"
+
+[[check]]
+at_ms = 10_000
+relay = true
+
+[[check]]
+at_ms = 295_000
+no_alarm = "fridge cooling"
+
+[[check]]
+at_ms = 301_000
+within_ms = 15000
+alarm = "fridge cooling"
+
+[[check]]
+at_ms = 346_000
+alarm = "fridge freeze"
+relay = false
+
+[[check]]
+at_ms = 382_000
+within_ms = 8000
+alarm = "fridge sensor"
+no_alarm = "fridge cooling"

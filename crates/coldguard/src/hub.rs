@@ -38,6 +38,7 @@ struct Envelope {
 struct Shared {
     fleet: Fleet,
     heartbeats: [Option<u64>; 3],
+    telemetry: [u64; 3],
     counts: [(u64, u64); 3],
 }
 
@@ -46,6 +47,8 @@ pub struct Hub {
     shared: Arc<Mutex<Shared>>,
     time_ms: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    /// Emulates a host that cannot store records.
+    pub reject: Arc<AtomicBool>,
     session: u32,
     seq: u32,
 }
@@ -103,6 +106,35 @@ pub fn database(path: &Path) -> rusqlite::Result<Connection> {
     Ok(db)
 }
 
+/// Write the records as JSON lines, oldest first.
+pub fn export(
+    path: &Path,
+    latest: bool,
+    out: &mut impl std::io::Write,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Err(format!("{}: no records", path.display()).into());
+    }
+    let db = database(path)?;
+    let mut query = db.prepare(
+        "SELECT session, node, boot, seq, time_ms, type, body FROM records
+         WHERE NOT ?1 OR session = (SELECT max(session) FROM records)
+         ORDER BY session, time_ms, node, boot, seq",
+    )?;
+    let mut rows = query.query([latest])?;
+    while let Some(r) = rows.next()? {
+        let body: String = r.get(6)?;
+        let body: Value = serde_json::from_str(&body).unwrap_or(Value::String(body));
+        let line = json!({
+            "session": r.get::<_, i64>(0)?, "node": r.get::<_, String>(1)?,
+            "boot": r.get::<_, i64>(2)?, "seq": r.get::<_, i64>(3)?,
+            "time_ms": r.get::<_, i64>(4)?, "type": r.get::<_, String>(5)?, "body": body,
+        });
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
 impl Hub {
     pub fn start(port: u16, db: &Path) -> Result<Self> {
         // Flash starts blank in each session, so boot numbers repeat.
@@ -119,10 +151,12 @@ impl Hub {
             shared: Arc::default(),
             time_ms: Arc::default(),
             stop: Arc::default(),
+            reject: Arc::default(),
             session,
             seq: 0,
         };
         let (shared, time, stop) = (hub.shared.clone(), hub.time_ms.clone(), hub.stop.clone());
+        let reject = hub.reject.clone();
         spawn(move || {
             for event in connection.iter() {
                 if stop.load(Ordering::Relaxed) {
@@ -135,6 +169,8 @@ impl Hub {
                             let _ = client.try_subscribe(topic, QoS::AtLeastOnce);
                         }
                     }
+                    Ok(Event::Incoming(Packet::Publish(p)))
+                        if reject.load(Ordering::Relaxed) && p.topic.ends_with("/event") => {}
                     Ok(Event::Incoming(Packet::Publish(p))) => {
                         let now = time.load(Ordering::Relaxed);
                         if let Err(e) =
@@ -162,8 +198,14 @@ impl Hub {
         for (id, heard) in NodeId::ALL.into_iter().zip(shared.heartbeats) {
             fleet.report_mut(id).online =
                 heard.is_some_and(|t| now.saturating_sub(t) <= OFFLINE_MS);
+            fleet.report_mut(id).age_ms = now.saturating_sub(shared.telemetry[id as usize]);
         }
         fleet
+    }
+
+    /// Last reported transit state of the carrier.
+    pub fn transit(&self) -> u64 {
+        self.shared.lock().unwrap().fleet.carrier.transit
     }
 
     /// Telemetry and heartbeat messages received from a node.
@@ -223,6 +265,7 @@ fn receive(
             let body: Value = serde_json::from_str(&e.body).map_err(|e| e.to_string())?;
             let mut s = shared.lock().unwrap();
             s.counts[id as usize].0 += 1;
+            s.telemetry[id as usize] = now;
             telemetry(&mut s.fleet, id, e.boot_id, &body);
         }
         "event" => {

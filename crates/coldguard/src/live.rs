@@ -19,6 +19,7 @@ const MAX_LINE: u64 = 4096;
 pub fn serve(
     scenario: Scenario,
     units: Option<&Toolchain>,
+    mut speed: f64,
     mut stop: impl FnMut() -> bool,
 ) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, LIVE_PORT))
@@ -26,12 +27,11 @@ pub fn serve(
     listener.set_nonblocking(true)?;
     let start = || -> Result<Option<Lab>, String> {
         let Some(t) = units else { return Ok(None) };
-        let db = t.tools().join("records.sqlite3");
+        let db = crate::records(t);
         Lab::start(t, Some(t.m.mqtt.port), &db).map(Some)
     };
     let mut lab = start()?;
     let mut sim = Simulation::new(scenario)?;
-    let mut speed = 1.0;
     let mut viewers: Vec<TcpStream> = vec![];
     let (tx, controls) = channel();
     let mut last = Instant::now();
@@ -93,6 +93,7 @@ pub fn serve(
             paused: sim.paused,
             finished: sim.finished(),
             speed,
+            caption: sim.caption().cloned(),
             world: sim.world().clone(),
             fleet: lab.as_ref().map(Lab::fleet),
         })?;

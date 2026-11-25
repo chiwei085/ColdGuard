@@ -5,7 +5,9 @@ mod scenario;
 mod simulation;
 mod world;
 
-pub use protocol::{Batch, Control, Entry, Fleet, Frame, LIVE_PORT, Report};
-pub use scenario::{Event, Scenario};
+pub use protocol::{Batch, Control, Entry, Fleet, Frame, LIVE_PORT, Report, batch_tag};
+pub use scenario::{Caption, Check, Event, Scenario};
 pub use simulation::Simulation;
-pub use world::{Action, Config, Node, NodeId, STEP_MS, Sensor, Thermal, ThermalConfig, World};
+pub use world::{
+    Action, Config, MAX_BATCHES, Node, NodeId, STEP_MS, Sensor, Thermal, ThermalConfig, World,
+};

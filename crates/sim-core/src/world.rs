@@ -5,6 +5,9 @@ pub const STEP_MS: u64 = 1;
 const STEP_S: f64 = STEP_MS as f64 / 1000.0;
 /// Commands pile up only without firmware.
 const MAX_OUTBOX: usize = 64;
+/// From the tap of a tag to the press of a button. The tag frame arrives first.
+const HANDLING_MS: u64 = 500;
+pub const MAX_BATCHES: u8 = 6;
 const STEP_H: f64 = STEP_S / 3600.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +41,10 @@ pub struct Config {
     pub battery_level: f64,
     pub battery_load_w: f64,
     pub charge_w: f64,
+    /// Batches delivered to the clinic.
+    pub batches: u8,
+    /// Carrying time to the receiver.
+    pub travel_s: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -83,6 +90,8 @@ impl Default for Config {
             battery_level: 1.0,
             battery_load_w: 1.0,
             charge_w: 5.0,
+            batches: 3,
+            travel_s: 60.0,
         }
     }
 }
@@ -116,6 +125,10 @@ impl Config {
         positive("battery_capacity_wh", self.battery_capacity_wh)?;
         not_negative("battery_load_w", self.battery_load_w)?;
         not_negative("charge_w", self.charge_w)?;
+        positive("travel_s", self.travel_s)?;
+        if self.batches > MAX_BATCHES {
+            return Err(format!("batches must not exceed {MAX_BATCHES}"));
+        }
         ratio("battery_level", self.battery_level)
     }
 }
@@ -169,6 +182,13 @@ pub enum Action {
     Scan {
         node: NodeId,
         uid: String,
+        /// Corrupts the frame on the wire.
+        #[serde(default)]
+        garbled: bool,
+    },
+    /// Staff carry the box to the receiver or back.
+    Carry {
+        away: bool,
     },
     /// Operator command for the firmware. No physical effect.
     Operate {
@@ -209,6 +229,7 @@ pub struct Node {
     pub last_scan: Option<String>,
     /// Distinguishes repeated scans of one tag.
     pub scan_count: u64,
+    pub scan_garbled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -218,9 +239,14 @@ pub struct World {
     pub fridge: Node,
     pub carrier: Node,
     pub inventory: Node,
-    /// Operator commands waiting for delivery.
+    /// Batches delivered to the clinic.
+    pub delivered: u8,
+    /// Way of the box to the receiver, from 0 to 1.
+    pub travel: f64,
+    pub away: bool,
+    /// Operator commands and when they are entered.
     #[serde(skip)]
-    pub outbox: Vec<Action>,
+    outbox: Vec<(u64, Action)>,
     #[serde(skip)]
     config: Config,
 }
@@ -245,6 +271,7 @@ impl World {
             network_up: true,
             last_scan: None,
             scan_count: 0,
+            scan_garbled: false,
         };
         Ok(Self {
             time_ms: 0,
@@ -252,6 +279,9 @@ impl World {
             fridge: node(Some(&config.fridge), true),
             carrier: node(Some(&config.carrier), false),
             inventory: node(None, true),
+            delivered: config.batches,
+            travel: 0.0,
+            away: false,
             outbox: vec![],
             config,
         })
@@ -298,22 +328,31 @@ impl World {
                 self.node_mut(*node).battery_level = *level;
             }
             Action::Network { node, up } => self.node_mut(*node).network_up = *up,
-            Action::Scan { node, uid } => {
+            Action::Scan { node, uid, garbled } => {
                 if uid.len() != 8 || !uid.bytes().all(|b| b.is_ascii_hexdigit()) {
                     return Err("uid must be 8 hex digits".into());
                 }
                 let node = self.node_mut(*node);
                 node.last_scan = Some(uid.to_ascii_uppercase());
                 node.scan_count += 1;
+                node.scan_garbled = *garbled;
             }
+            Action::Carry { away } => self.away = *away,
             Action::Operate { .. } => {
                 if self.outbox.len() >= MAX_OUTBOX {
                     return Err("too many pending commands".into());
                 }
-                self.outbox.push(action.clone());
+                self.outbox
+                    .push((self.time_ms + HANDLING_MS, action.clone()));
             }
         }
         Ok(())
+    }
+
+    /// Remove the commands that are entered by now.
+    pub fn take_commands(&mut self) -> Vec<Action> {
+        let due = self.outbox.partition_point(|(t, _)| *t <= self.time_ms);
+        self.outbox.drain(..due).map(|(_, a)| a).collect()
     }
 
     /// Advance by one fixed step.
@@ -322,6 +361,8 @@ impl World {
         for node in [&mut self.fridge, &mut self.carrier, &mut self.inventory] {
             node.step(ambient, config);
         }
+        let way = STEP_S / config.travel_s * if self.away { 1.0 } else { -1.0 };
+        self.travel = (self.travel + way).clamp(0.0, 1.0);
         self.time_ms += STEP_MS;
     }
 

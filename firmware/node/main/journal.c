@@ -218,7 +218,14 @@ void journal_ack(uint32_t ack_boot, uint32_t seq)
     xSemaphoreTake(lock, portMAX_DELAY);
     for (int i = 0; i < span; i++) {
         int at = (tail + i) % slots;
-        if (load(at, &s) && s.boot == ack_boot && s.seq == seq) {
+        if (!load(at, &s)) {
+            continue;
+        }
+        /* Records are in order. A repeated ack must not scan the whole log. */
+        if (s.boot > ack_boot || (s.boot == ack_boot && s.seq > seq)) {
+            break;
+        }
+        if (s.boot == ack_boot && s.seq == seq) {
             uint8_t done = 0;
             if (s.unacked
                 && esp_partition_write(part, at * SLOT + offsetof(slot_t, unacked), &done, 1) == ESP_OK) {

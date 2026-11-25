@@ -3,7 +3,7 @@
 小型診所疫苗冷鏈的容錯嵌入式系統。三個 ESP32 節點（冰箱、冷藏箱、庫存終端）執行 FreeRTOS 韌體，透過 MQTT 協作，並在模擬的物理環境中運行。
 
 - 報告日：2026-12-16
-- 狀態：技術驗證（spike）尚未開始
+- 狀態：韌體閉環與劇本重播可執行，驗收結果以 `accept` 為準
 
 ## 技術選型
 
@@ -32,8 +32,10 @@ cargo run -- exec idf.py --version # 在專案環境中執行指令
 ## 模擬
 
 ```sh
-cargo run -- demo                      # 3D 診所與三個韌體節點（加 --no-firmware 只跑物理）；點擊門、箱蓋、讀卡機（或按 1、2、3），4 切換 relay，5–8 注入故障，右鍵拖曳與滾輪控制鏡頭，點終端螢幕或按 Tab 開庫存與轉運面板
-cargo run -- accept                    # S、B4、F 驗收，可指定項目，例如 accept F1 F2（S4 需 10 分鐘）
+cargo run -- demo                      # 3D 診所與三個韌體節點（加 --no-firmware 只跑物理）；點擊門、箱蓋、員工證（或按 1、2、3），點批次盒直接操作該批次，點終端螢幕或按 Tab 看全部庫存與記錄；4 切換 relay，5–8 注入故障，V 換視角，右鍵拖曳與滾輪控制鏡頭
+cargo run -- demo scenarios/story.toml # 有字幕與運鏡的主線重播；分支為 excursion、failures、refusals
+cargo run -- records --latest          # 匯出主機 SQLite 記錄（JSON lines）
+cargo run -- accept                    # S、B4、F、D2 驗收，可指定項目，例如 accept F1 F2（S4 需 10 分鐘）
 cargo run -- sim scenarios/outage.toml # headless 執行劇本，每行輸出一筆 JSON 快照
 cargo test -p sim-core                 # B1、B2 驗收
 cargo test                             # B3 虛擬裝置與主機端測試

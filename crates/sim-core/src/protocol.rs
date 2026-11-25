@@ -1,4 +1,7 @@
-use crate::world::{Action, NodeId, World};
+use crate::{
+    scenario::Caption,
+    world::{Action, NodeId, World},
+};
 use serde::{Deserialize, Serialize};
 
 /// Loopback port for viewers.
@@ -28,6 +31,7 @@ pub struct Frame {
     pub finished: bool,
     pub speed: f64,
     pub world: World,
+    pub caption: Option<Caption>,
     /// Missing without firmware.
     pub fleet: Option<Fleet>,
 }
@@ -46,6 +50,10 @@ pub struct Fleet {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub online: bool,
+    /// Time since the last telemetry.
+    pub age_ms: u64,
+    /// Local buzzer pin. Works without a network.
+    pub buzzer: bool,
     pub boot_id: u32,
     pub temp_c: Option<f64>,
     pub battery: f64,
@@ -65,6 +73,7 @@ pub struct Report {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
     pub name: String,
+    /// fridge, carrier, quarantine, receiver or discard.
     pub place: String,
     /// stored, transit, pending or out.
     pub phase: String,
@@ -78,6 +87,12 @@ pub struct Entry {
     pub node: NodeId,
     pub kind: String,
     pub body: String,
+}
+
+/// RFID tag on a batch. Names end in a two digit number.
+pub fn batch_tag(name: &str) -> String {
+    let digits = name.get(name.len().saturating_sub(2)..);
+    format!("B10000{}", digits.unwrap_or("00"))
 }
 
 impl Fleet {

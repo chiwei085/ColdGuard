@@ -19,14 +19,17 @@
 #define DEPART_BATTERY 0.2f
 #define DEPART_SAFE_S ((5 + 15 + 15) * 60)
 
+enum { IN_FRIDGE, IN_CARRIER, IN_QUARANTINE, AT_RECEIVER, IN_DISCARD };
 enum { STORED, IN_TRANSIT, PENDING, CHECKED_OUT };
 enum { OK, DO_NOT_USE, DISCARDED };
 
+static const char *const places[] = {"fridge", "carrier", "quarantine", "receiver", "discard"};
 static const char *const phases[] = {"stored", "transit", "pending", "out"};
 static const char *const statuses[] = {"ok", "dnu", "discarded"};
 
 typedef struct {
     char name[BATCH_NAME];
+    char uid[UID_LEN + 1];
     uint8_t place;
     uint8_t phase;
     uint8_t status;
@@ -44,6 +47,7 @@ static struct {
 static struct {
     int64_t heard_ms;
     bool online, valid, excursion;
+    int backlog;
 } peer[NODES];
 
 typedef struct {
@@ -53,6 +57,10 @@ typedef struct {
     uint32_t boot, seq;
     char *body;
 } message_t;
+
+/* Last batch tag presented. */
+static char tag[UID_LEN + 1];
+static int64_t tag_ms;
 
 static QueueHandle_t inbox;
 static SemaphoreHandle_t lock;
@@ -88,7 +96,7 @@ int app_stock_json(char *out, int size)
         const batch_t *b = &stock.batch[i];
         if (b->name[0]) {
             n += snprintf(out + n, size - n, "%s[\"%s\",\"%s\",\"%s\",\"%s\"]", first ? "" : ",",
-                          b->name, node_names[b->place], phases[b->phase], statuses[b->status]);
+                          b->name, places[b->place], phases[b->phase], statuses[b->status]);
             first = false;
         }
     }
@@ -123,14 +131,20 @@ static bool plain(const char *s, size_t max)
     return n < max;
 }
 
-static void mark_unusable(node_t place)
+/* The unit that watches a place, or NODES for none. */
+static node_t watcher(uint8_t place)
+{
+    return place == IN_CARRIER ? CARRIER : place <= IN_QUARANTINE ? FRIDGE : NODES;
+}
+
+static void mark_unusable(node_t unit)
 {
     for (int i = 0; i < BATCHES; i++) {
         batch_t *b = &stock.batch[i];
-        if (b->name[0] && b->place == place && b->phase != CHECKED_OUT && b->status == OK) {
+        if (b->name[0] && watcher(b->place) == unit && b->phase != CHECKED_OUT && b->status == OK) {
             b->status = DO_NOT_USE;
             journal_add(CRITICAL, "batch", "{\"batch\":\"%s\",\"status\":\"dnu\",\"place\":\"%s\"}",
-                        b->name, node_names[place]);
+                        b->name, places[b->place]);
         }
     }
 }
@@ -150,7 +164,7 @@ static void move_carried(uint8_t from, uint8_t to)
     bool changed = false;
     for (int i = 0; i < BATCHES; i++) {
         batch_t *b = &stock.batch[i];
-        if (b->name[0] && b->place == CARRIER && b->phase == from) {
+        if (b->name[0] && b->place == IN_CARRIER && b->phase == from) {
             b->phase = to;
             changed = true;
             journal_add(CRITICAL, "batch", "{\"batch\":\"%s\",\"phase\":\"%s\"}", b->name, phases[to]);
@@ -203,6 +217,7 @@ static void on_peer(const message_t *m, const cJSON *body)
     } else if (strcmp(m->kind, "telemetry") == 0 && strcmp(m->type, "telemetry") == 0) {
         peer[m->from].valid = number(body, "valid");
         peer[m->from].excursion = number(body, "excursion");
+        peer[m->from].backlog = number(body, "backlog");
         follow_lock(m->from, number(body, "lock"));
         if (m->from == CARRIER) {
             follow_transit(number(body, "transit"));
@@ -235,18 +250,25 @@ static batch_t *find(const char *name)
 
 static batch_t *vacant(void)
 {
-    for (int i = 0; i < BATCHES; i++) {
-        batch_t *b = &stock.batch[i];
-        if (!b->name[0] || b->phase == CHECKED_OUT) {
-            return b;
+    /* Forget a dispensed batch only when needed. */
+    for (int reuse = 0; reuse < 2; reuse++) {
+        for (int i = 0; i < BATCHES; i++) {
+            batch_t *b = &stock.batch[i];
+            if (!b->name[0] || (reuse && b->phase == CHECKED_OUT)) {
+                return b;
+            }
         }
     }
     return NULL;
 }
 
-/* Why a storage unit cannot vouch for its contents, or NULL. */
-static const char *doubt(node_t place)
+/* Why a place cannot vouch for its contents, or NULL. */
+static const char *doubt(uint8_t at)
 {
+    node_t place = watcher(at);
+    if (place == NODES) {
+        return NULL;
+    }
     if (!peer[place].online) {
         return "storage offline";
     }
@@ -262,7 +284,7 @@ static const char *handle_stock(const char *cmd, const char *name, const cJSON *
     const char *note = text(body, "note");
     batch_t *b = find(name);
     if (strcmp(cmd, "checkin") == 0) {
-        node_t place = strcmp(text(body, "to"), "carrier") == 0 ? CARRIER : FRIDGE;
+        uint8_t place = strcmp(text(body, "to"), "carrier") == 0 ? IN_CARRIER : IN_FRIDGE;
         if (b && b->phase != CHECKED_OUT) {
             return "already stored";
         }
@@ -273,12 +295,21 @@ static const char *handle_stock(const char *cmd, const char *name, const cJSON *
         if (why) {
             return why;
         }
+        if (!tag[0] || (b && strcmp(b->uid, tag) != 0)) {
+            return "scan batch";
+        }
+        for (int i = 0; i < BATCHES; i++) {
+            if (&stock.batch[i] != b && stock.batch[i].name[0] && strcmp(stock.batch[i].uid, tag) == 0) {
+                return "tag in use";
+            }
+        }
         /* A returned batch keeps its verdict. */
         uint8_t status = b ? b->status : OK;
         if (!b && !(b = vacant())) {
             return "stock full";
         }
         strlcpy(b->name, name, sizeof b->name);
+        strlcpy(b->uid, tag, sizeof b->uid);
         b->place = place;
         b->phase = STORED;
         b->status = status;
@@ -286,6 +317,16 @@ static const char *handle_stock(const char *cmd, const char *name, const cJSON *
     }
     if (!b) {
         return "unknown batch";
+    }
+    if (strcmp(b->uid, tag) != 0) {
+        return "scan batch";
+    }
+    if (strcmp(cmd, "quarantine") == 0) {
+        if (b->status != DO_NOT_USE || b->place != IN_FRIDGE || b->phase != STORED) {
+            return "not locked in fridge";
+        }
+        b->place = IN_QUARANTINE;
+        return NULL;
     }
     if (strcmp(cmd, "release") == 0 || strcmp(cmd, "discard") == 0) {
         if (!note[0]) {
@@ -300,6 +341,12 @@ static const char *handle_stock(const char *cmd, const char *name, const cJSON *
             return why;
         }
         b->status = release ? OK : DISCARDED;
+        if (!release) {
+            b->place = IN_DISCARD;
+            b->phase = STORED;
+        } else if (b->place == IN_QUARANTINE) {
+            b->place = IN_FRIDGE;
+        }
         return NULL;
     }
     if (b->status != OK) {
@@ -309,38 +356,41 @@ static const char *handle_stock(const char *cmd, const char *name, const cJSON *
         if (b->phase != PENDING) {
             return "not pending";
         }
-        const char *why = doubt(CARRIER);
-        why = why ? why : doubt(FRIDGE);
+        const char *why = doubt(IN_CARRIER);
         if (why) {
             return why;
         }
-        b->place = FRIDGE;
+        /* The whole transport must be on record before a decision. */
+        if (peer[CARRIER].backlog > 0) {
+            return "records incomplete";
+        }
+        b->place = AT_RECEIVER;
         b->phase = STORED;
         return NULL;
     }
-    if (b->phase != STORED) {
-        return phases[b->phase];
-    }
-    const char *why = doubt(b->place);
+    const char *why = b->phase == CHECKED_OUT ? NULL : doubt(b->place);
     if (why) {
         return why;
+    }
+    if (b->phase != STORED) {
+        return phases[b->phase];
     }
     if (strcmp(cmd, "checkout") == 0) {
         b->phase = CHECKED_OUT;
         return NULL;
     }
     if (strcmp(cmd, "load") == 0) {
-        if (b->place == CARRIER) {
-            return "already loaded";
+        if (b->place != IN_FRIDGE) {
+            return "not in fridge";
         }
-        why = doubt(CARRIER);
+        why = doubt(IN_CARRIER);
         if (why) {
             return why;
         }
-        if (stock.transit == TRANSIT_ACTIVE) {
-            return "carrier in transit";
+        if (stock.transit != TRANSIT_NONE) {
+            return "carrier away";
         }
-        b->place = CARRIER;
+        b->place = IN_CARRIER;
         return NULL;
     }
     return "unknown command";
@@ -353,7 +403,7 @@ static const char *handle_carrier(const char *cmd, const state_t *s)
         return NULL;
     }
     if (strcmp(cmd, "depart") == 0) {
-        if (s->transit == TRANSIT_ACTIVE) {
+        if (s->transit != TRANSIT_NONE) {
             return "already departed";
         }
         if (!s->receiver_ready) {
@@ -379,6 +429,13 @@ static const char *handle_carrier(const char *cmd, const state_t *s)
             return "not in transit";
         }
         state_transit(TRANSIT_ARRIVED, false);
+        return NULL;
+    }
+    if (strcmp(cmd, "return") == 0) {
+        if (s->transit != TRANSIT_ARRIVED) {
+            return "not at receiver";
+        }
+        state_transit(TRANSIT_NONE, false);
         return NULL;
     }
     return "unknown command";
@@ -408,6 +465,9 @@ static void on_command(const message_t *m, const cJSON *body)
         /* Custody changes only after its record is in flash. */
         static typeof(stock) before;
         before = stock;
+        if (now_ms() - tag_ms > BADGE_MS) {
+            tag[0] = '\0';
+        }
         why = handle_stock(cmd, name, body);
         if (!why) {
             if (journal_add(CRITICAL, "op",
@@ -465,8 +525,17 @@ static void badges(void *arg)
     for (;;) {
         char uid[UID_LEN + 1];
         if (bus_tag(uid)) {
-            state_person(uid);
-            journal_add(CRITICAL, "scan", "{\"uid\":\"%s\"}", uid);
+            /* Staff badges share one prefix. All other tags are batches. */
+            bool staff = strncmp(uid, "04", 2) == 0;
+            if (staff) {
+                state_person(uid);
+            } else {
+                xSemaphoreTake(lock, portMAX_DELAY);
+                strlcpy(tag, uid, sizeof tag);
+                tag_ms = now_ms();
+                xSemaphoreGive(lock);
+            }
+            journal_add(CRITICAL, "scan", "{\"uid\":\"%s\",\"staff\":%d}", uid, staff);
         } else {
             journal_add(CRITICAL, "scan", "{\"error\":\"bad frame\"}");
         }

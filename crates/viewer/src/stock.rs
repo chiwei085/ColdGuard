@@ -2,7 +2,8 @@
 
 use crate::{
     Live,
-    hud::{IDLE, MUTED, PANEL, WARNING, label},
+    batches::{self, closed},
+    hud::{IDLE, MUTED, PANEL, Sent, WARNING, label},
     link::Link,
     scene::{badge, scan},
 };
@@ -12,21 +13,37 @@ use bevy::{
     render::render_resource::TextureFormat,
     ui_widgets::{Activate, Button},
 };
-use sim_core::{Action, Batch, Fleet, NodeId};
+use sim_core::{Action, Batch, Entry, Frame, NodeId, batch_tag};
 
 const SCREEN: UVec2 = UVec2::new(640, 360);
 const GOOD: Color = Color::srgb(0.3, 0.85, 0.5);
 const BAD: Color = Color::srgb(1.0, 0.35, 0.3);
 const SHOWN_EVENTS: usize = 3;
+const SHOWN_RECORDS: usize = 12;
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<PanelOpen>()
         .add_systems(Startup, build)
-        .add_systems(Update, (toggle, refresh));
+        .init_resource::<Doors>()
+        .add_systems(Update, (toggle, refresh, close_doors));
+}
+
+#[derive(Clone, Default, PartialEq)]
+pub enum Panel {
+    #[default]
+    Closed,
+    All,
+    Batch(String),
 }
 
 #[derive(Resource, Default)]
-pub struct PanelOpen(pub bool);
+pub struct PanelOpen(pub Panel);
+
+/// Doors opened for a move, and when they close again.
+#[derive(Resource, Default)]
+struct Doors(Vec<(NodeId, u64)>);
+
+const DOOR_MS: u64 = 5000;
 
 /// Texture shown on the terminal.
 #[derive(Resource)]
@@ -38,10 +55,16 @@ struct ScreenRoot;
 #[derive(Component)]
 struct PanelRoot;
 
-fn build(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+/// Image drawn by its own UI camera.
+pub fn target(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+    size: UVec2,
+    order: isize,
+) -> (Handle<Image>, Entity) {
     let image = images.add(Image::new_target_texture(
-        SCREEN.x,
-        SCREEN.y,
+        size.x,
+        size.y,
         TextureFormat::Bgra8UnormSrgb,
         None,
     ));
@@ -49,13 +72,18 @@ fn build(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         .spawn((
             Camera2d,
             Camera {
-                order: -1,
+                order,
                 clear_color: Color::srgb(0.03, 0.05, 0.07).into(),
                 ..default()
             },
             RenderTarget::Image(image.clone().into()),
         ))
         .id();
+    (image, camera)
+}
+
+fn build(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let (image, camera) = target(&mut commands, &mut images, SCREEN, -1);
     commands.insert_resource(ScreenImage(image));
     commands.spawn((
         ScreenRoot,
@@ -94,7 +122,10 @@ fn column(node: Node) -> Node {
 
 fn toggle(input: Res<ButtonInput<KeyCode>>, mut open: ResMut<PanelOpen>) {
     if input.just_pressed(KeyCode::Tab) {
-        open.0 = !open.0;
+        open.0 = match open.0 {
+            Panel::Closed => Panel::All,
+            _ => Panel::Closed,
+        };
     }
 }
 
@@ -102,51 +133,107 @@ fn toggle(input: Res<ButtonInput<KeyCode>>, mut open: ResMut<PanelOpen>) {
 #[derive(Default, PartialEq)]
 struct Shown {
     connected: bool,
-    open: bool,
+    open: Panel,
+    delivered: u8,
+    travel: f64,
     batches: Vec<Batch>,
     person: String,
     transit: u64,
     receiver: bool,
     events: Vec<(String, bool)>,
+    records: Vec<(String, bool)>,
 }
 
 impl Shown {
-    fn new(fleet: Option<&Fleet>, open: bool) -> Self {
-        let Some(f) = fleet else {
+    fn new(frame: Option<&Frame>, open: Panel) -> Self {
+        let Some((frame, f)) = frame.and_then(|f| Some((f, f.fleet.as_ref()?))) else {
             return Self { open, ..default() };
         };
-        let mut events: Vec<_> = f
-            .events
-            .iter()
-            .rev()
-            .filter_map(|e| describe(&e.kind, &e.body, e.node))
-            .take(SHOWN_EVENTS)
-            .collect();
-        events.reverse();
+        let last = |count, list: &mut dyn Iterator<Item = (String, bool)>| {
+            let mut list: Vec<_> = list.take(count).collect();
+            list.reverse();
+            list
+        };
+        let entries = || f.events.iter().rev();
+        let mut told = entries()
+            .filter(|e| matches!(e.kind.as_str(), "op" | "alarm" | "peer"))
+            .filter_map(describe);
+        let stamped = |e: &Entry| {
+            let (text, bad) = describe(e)?;
+            let s = e.time_ms / 1000;
+            Some((format!("{:02}:{:02}  {text}", s / 60, s % 60), bad))
+        };
+        let mut all = entries().filter_map(stamped);
+        // The evidence for a verdict.
+        let mut evidence = entries()
+            .filter(|e| e.kind == "excursion" || about(e, &open))
+            .filter_map(stamped);
+        let records = match open {
+            Panel::Closed => vec![],
+            Panel::All => last(SHOWN_RECORDS, &mut all),
+            Panel::Batch(_) => last(SHOWN_RECORDS / 2, &mut evidence),
+        };
         Self {
             connected: f.inventory.online,
-            open,
+            delivered: frame.world.delivered,
+            travel: if frame.world.travel < 1.0 { 0.0 } else { 1.0 },
             batches: f.batches.clone(),
             person: f.inventory.person.clone(),
             transit: f.carrier.transit,
             receiver: f.carrier.receiver,
-            events,
+            events: last(SHOWN_EVENTS, &mut told),
+            records,
+            open,
         }
     }
 }
 
+/// Whether a record names the batch shown.
+fn about(e: &Entry, open: &Panel) -> bool {
+    matches!(open, Panel::Batch(name) if e.body.contains(&format!("\"{name}\"")))
+}
+
 /// One line for an operator, and whether it is bad news.
-fn describe(kind: &str, body: &str, node: NodeId) -> Option<(String, bool)> {
-    let b: serde_json::Value = serde_json::from_str(body).ok()?;
+pub fn describe(e: &Entry) -> Option<(String, bool)> {
+    let b: serde_json::Value = serde_json::from_str(&e.body).ok()?;
     let text = |key: &str| b[key].as_str().unwrap_or_default().to_string();
-    let name = node.name();
-    Some(match kind {
-        "op" if b["ok"] == 1 => (format!("{} {} done", text("cmd"), text("batch")), false),
-        "op" => (
-            format!("{} {} refused: {}", text("cmd"), text("batch"), text("why")),
+    let name = e.node.name();
+    let subject = [text("cmd"), text("batch"), text("box")]
+        .into_iter()
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let by = match text("person") {
+        p if p.is_empty() => p,
+        p => format!(" by {p}"),
+    };
+    Some(match e.kind.as_str() {
+        "op" if b["ok"] == 1 && !text("note").is_empty() => {
+            (format!("{subject} done{by}: {}", text("note")), false)
+        }
+        "op" if b["ok"] == 1 => (format!("{subject} done{by}"), false),
+        "op" => (format!("{subject} refused: {}", text("why")), true),
+        "alarm" => {
+            let on = b["on"] == 1;
+            let end = if on { "" } else { " cleared" };
+            (
+                format!("{name}: {}{end}", text("alarm").replace('_', " ")),
+                on,
+            )
+        }
+        "excursion" if b["on"] == 1 => (format!("{name}: out of range at {} C", b["temp_c"]), true),
+        "excursion" => (
+            format!(
+                "{name}: {} to {} C for {} s",
+                b["min_c"], b["max_c"], b["secs"]
+            ),
             true,
         ),
-        "alarm" if b["on"] == 1 => (format!("{name}: {}", text("alarm").replace('_', " ")), true),
+        "batch" if b["status"] == "dnu" => (format!("{} locked", text("batch")), true),
+        "batch" => (format!("{} {}", text("batch"), text("phase")), false),
+        "scan" if b["staff"] == 1 => (format!("badge {} at {name}", text("uid")), false),
+        "scan" if b["staff"] == 0 => (format!("batch tag {} at {name}", text("uid")), false),
+        "scan" => (format!("unreadable tag at {name}"), true),
         "peer" if b["online"] == 0 => (format!("{} lost contact", text("peer")), true),
         "peer" => (format!("{} connected", text("peer")), false),
         _ => return None,
@@ -161,13 +248,12 @@ fn refresh(
     panel: Single<(Entity, &mut Node), With<PanelRoot>>,
     mut last: Local<Option<Shown>>,
 ) {
-    let fleet = live.0.as_ref().and_then(|f| f.fleet.as_ref());
-    let shown = Shown::new(fleet, open.0);
+    let shown = Shown::new(live.0.as_ref(), open.0.clone());
     if last.as_ref() == Some(&shown) {
         return;
     }
     let (panel, mut layout) = panel.into_inner();
-    layout.display = if shown.open {
+    layout.display = if shown.open != Panel::Closed {
         Display::Flex
     } else {
         Display::None
@@ -236,47 +322,80 @@ fn draw_panel(p: &mut ChildSpawnerCommands, s: &Shown) {
     };
     p.spawn(row()).with_children(|p| {
         p.spawn(label(&badge_text, 14.0, MUTED));
-        button(p, "Scan", vec![scan()]);
-        if let Some(name) = next_name(&s.batches) {
-            button(p, "Check in", vec![operate("checkin", &name, "")]);
-        }
+        button(p, "Badge", vec![scan()]);
+        close_button(p);
     });
-    for b in &s.batches {
-        let (text, color) = verdict(b);
+    for i in 0..usize::from(s.delivered) {
+        let name = batches::name(i);
+        if matches!(&s.open, Panel::Batch(only) if *only != name) {
+            continue;
+        }
+        let batch = s.batches.iter().find(|b| b.name == name);
+        let (text, color) = batch.map_or(("DELIVERED", MUTED), verdict);
         p.spawn(row()).with_children(|p| {
-            p.spawn(label(&b.name, 15.0, Color::WHITE));
+            p.spawn(label(&name, 15.0, Color::WHITE));
             p.spawn(label(text, 13.0, color));
-            for (text, cmd, note) in choices(b) {
-                button(p, text, vec![operate(cmd, &b.name, note)]);
+            if batch.is_none() {
+                button(p, "Check in", operate("checkin", &name, ""));
+            }
+            for (text, cmd, note) in batch.map_or(&[][..], choices) {
+                button(p, text, operate(cmd, &name, note));
             }
         });
     }
-    let carrier = match s.transit {
-        1 => "Carrier on the way",
-        2 => "Carrier arrived",
-        _ => "Carrier",
-    };
-    p.spawn(row()).with_children(|p| {
-        p.spawn(label(carrier, 14.0, MUTED));
-        // The person at the box presents the badge there.
-        let commands: &[(&str, &str, &str)] = match (s.transit, s.receiver) {
-            (1, _) => &[("Arrive", "arrive", "handed over")],
-            (_, false) => &[("Receiver ready", "receiver", "receiver confirmed")],
-            (_, true) => &[("Depart", "depart", "")],
+    if s.open == Panel::All {
+        let carrier = match (s.transit, s.travel) {
+            (1, 0.0) => "BOX-1 on the way",
+            (1, _) => "BOX-1 at the receiver",
+            (2, _) => "BOX-1 arrived",
+            _ => "BOX-1",
         };
-        for (text, cmd, note) in commands {
-            let node = NodeId::Carrier;
-            button(p, text, vec![badge(node), command(node, cmd, "", note)]);
-        }
-    });
-    for (text, bad) in &s.events {
-        p.spawn(label(text, 13.0, if *bad { WARNING } else { MUTED }));
+        p.spawn(row()).with_children(|p| {
+            p.spawn(label(carrier, 14.0, MUTED));
+            // The person at the box presents the badge there.
+            let commands: &[(&str, &str, &str)] = match (s.transit, s.receiver) {
+                (1, _) if s.travel < 1.0 => &[],
+                (1, _) => &[("Arrive", "arrive", "handed over")],
+                (2, _) if s.batches.iter().all(|b| b.phase != "pending") => {
+                    &[("Return", "return", "")]
+                }
+                (2, _) => &[],
+                (_, false) => &[("Receiver ready", "receiver", "receiver confirmed")],
+                (_, true) => &[("Depart", "depart", "")],
+            };
+            for (text, cmd, note) in commands {
+                let node = NodeId::Carrier;
+                button(p, text, vec![badge(node), command(node, cmd, "", note)]);
+            }
+        });
     }
+    for (text, bad) in &s.records {
+        p.spawn(label(text, 12.0, if *bad { WARNING } else { MUTED }));
+    }
+}
+
+fn close_button(p: &mut ChildSpawnerCommands) {
+    p.spawn((
+        Button,
+        Node {
+            padding: UiRect::axes(px(10), px(5)),
+            border_radius: BorderRadius::all(px(6)),
+            ..default()
+        },
+        BackgroundColor(IDLE),
+        children![label("Close", 13.0, Color::WHITE)],
+    ))
+    .observe(|_: On<Activate>, mut open: ResMut<PanelOpen>| open.0 = Panel::Closed);
 }
 
 /// Offers only what may apply. The firmware decides.
 fn choices(b: &Batch) -> &'static [(&'static str, &'static str, &'static str)] {
     match (b.status.as_str(), b.phase.as_str()) {
+        ("dnu", "stored") if b.place == "fridge" => &[
+            ("Quarantine", "quarantine", ""),
+            ("Release", "release", "maker confirmed stable"),
+            ("Discard", "discard", "maker rejected"),
+        ],
         ("dnu", _) => &[
             ("Release", "release", "maker confirmed stable"),
             ("Discard", "discard", "maker rejected"),
@@ -285,20 +404,45 @@ fn choices(b: &Batch) -> &'static [(&'static str, &'static str, &'static str)] {
         ("ok", "stored") if b.place == "fridge" => {
             &[("Check out", "checkout", ""), ("Load", "load", "")]
         }
+        ("ok", "out") => &[("Check in", "checkin", "")],
         ("ok", "stored") => &[("Check out", "checkout", "")],
         _ => &[],
     }
 }
 
-/// First free demo name.
-fn next_name(batches: &[Batch]) -> Option<String> {
-    (1..=8)
-        .map(|i| format!("VAX-{i:02}"))
-        .find(|n| !batches.iter().any(|b| b.name == *n && b.phase != "out"))
+/// The batch tag goes past the reader before the command.
+fn operate(cmd: &str, batch: &str, note: &str) -> Vec<Action> {
+    let node = NodeId::Inventory;
+    let tag = Action::Scan {
+        node,
+        uid: batch_tag(batch),
+        garbled: false,
+    };
+    vec![tag, command(node, cmd, batch, note)]
 }
 
-fn operate(cmd: &str, batch: &str, note: &str) -> Action {
-    command(NodeId::Inventory, cmd, batch, note)
+/// Units a command reaches into.
+fn doors(cmd: &str) -> &'static [NodeId] {
+    match cmd {
+        "checkin" | "checkout" | "quarantine" | "release" | "discard" => &[NodeId::Fridge],
+        "load" => &[NodeId::Fridge, NodeId::Carrier],
+        "accept" => &[NodeId::Carrier],
+        _ => &[],
+    }
+}
+
+fn close_doors(live: Res<Live>, link: Res<Link>, mut doors: ResMut<Doors>) {
+    let Some(f) = &live.0 else { return };
+    doors.0.retain(|(node, at)| {
+        let wait = f.world.time_ms < *at && f.world.time_ms + DOOR_MS >= *at;
+        if !wait {
+            link.act(Action::Door {
+                node: *node,
+                open: false,
+            });
+        }
+        wait
+    });
 }
 
 fn command(node: NodeId, cmd: &str, batch: &str, note: &str) -> Action {
@@ -322,9 +466,33 @@ fn button(p: &mut ChildSpawnerCommands, text: &str, actions: Vec<Action>) {
         BackgroundColor(IDLE),
         children![label(text, 13.0, Color::WHITE)],
     ))
-    .observe(move |_: On<Activate>, link: Res<Link>| {
-        for action in &actions {
-            link.act(action.clone());
-        }
-    });
+    .observe(
+        move |_: On<Activate>,
+              live: Res<Live>,
+              link: Res<Link>,
+              mut sent: ResMut<Sent>,
+              mut opened: ResMut<Doors>| {
+            let Some(f) = &live.0 else { return };
+            let now = f.world.time_ms;
+            for action in &actions {
+                link.act(action.clone());
+                let Action::Operate { cmd, .. } = action else {
+                    continue;
+                };
+                sent.0 = Some(now);
+                for id in doors(cmd) {
+                    let held = opened.0.iter_mut().find(|(n, _)| n == id);
+                    if let Some(held) = held {
+                        held.1 = now + DOOR_MS;
+                    } else if closed(f, *id) {
+                        link.act(Action::Door {
+                            node: *id,
+                            open: true,
+                        });
+                        opened.0.push((*id, now + DOOR_MS));
+                    }
+                }
+            }
+        },
+    );
 }

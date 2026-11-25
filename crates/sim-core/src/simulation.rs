@@ -1,5 +1,5 @@
 use crate::{
-    scenario::Scenario,
+    scenario::{Caption, Scenario},
     world::{Action, World},
 };
 
@@ -27,6 +27,16 @@ impl Simulation {
 
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.world
+    }
+
+    pub fn scenario(&self) -> &Scenario {
+        &self.scenario
+    }
+
+    /// Latest narration.
+    pub fn caption(&self) -> Option<&Caption> {
+        let now = self.world.time_ms;
+        self.scenario.captions.iter().rfind(|c| c.at_ms <= now)
     }
 
     pub fn finished(&self) -> bool {
