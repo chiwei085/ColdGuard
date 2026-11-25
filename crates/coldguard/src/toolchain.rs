@@ -34,6 +34,15 @@ impl Toolchain {
         self.tools().join("idf-python")
     }
 
+    pub fn verify(&self, file: &Path, want: &str) -> Result<(), String> {
+        let got = self.output("sha256sum", &[&file.to_string_lossy()])?;
+        if got.split_whitespace().next() == Some(want) {
+            Ok(())
+        } else {
+            Err(format!("SHA-256 mismatch: {got}"))
+        }
+    }
+
     pub fn esp_emu(&self) -> PathBuf {
         let version = &self.m.esp_emu.version;
         self.tools().join("esp-emu").join(version).join("esp-emu")

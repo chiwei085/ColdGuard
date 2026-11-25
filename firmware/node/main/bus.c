@@ -123,7 +123,7 @@ static bool read_temperature(float *celsius)
     return (int16_t)value != TMP117_NO_DATA;
 }
 
-bool bus_sample(sample_t *out)
+void bus_sample(sample_t *out)
 {
     uint16_t level = 0, mv = 0;
     memset(out, 0, sizeof *out);
@@ -134,7 +134,6 @@ bool bus_sample(sample_t *out)
     out->battery_mv = mv;
     out->door_open = thermometer && gpio_get_level(PIN_DOOR);
     out->mains = gpio_get_level(PIN_MAINS);
-    return out->temp_valid;
 }
 
 void bus_relay(bool on)

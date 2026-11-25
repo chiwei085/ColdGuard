@@ -18,11 +18,8 @@
 #define DOOR_LIMIT_S 60
 #define COOLING_WINDOW_S 300
 #define COOLING_DROP_C 0.2f
-#define WINDOW_S 60
 /* Below four sensor steps a rise is indistinguishable from noise. */
 #define MIN_RISE_C 0.031f
-/* Packing, travel and margin. */
-#define TRANSPORT_S ((5 + 15 + 15) * 60)
 /* Battery capacity over monitoring load. */
 #define BATTERY_FULL_S 36000
 /* Passive carrier, validated model at high ambient. */
@@ -37,7 +34,7 @@ const char *const alarm_names[ALARMS] = {
 static state_t state;
 static SemaphoreHandle_t lock;
 static QueueHandle_t samples;
-static float recent[WINDOW_S];
+static float recent[HISTORY_S];
 static int recent_count;
 
 state_t state_get(void)
@@ -45,6 +42,9 @@ state_t state_get(void)
     xSemaphoreTake(lock, portMAX_DELAY);
     state_t copy = state;
     xSemaphoreGive(lock);
+    if (now_ms() - copy.person_ms >= BADGE_MS) {
+        copy.person[0] = '\0';
+    }
     return copy;
 }
 
@@ -86,7 +86,7 @@ void state_person(const char *uid)
     xSemaphoreGive(lock);
 }
 
-int control_recent(float out[60])
+int control_recent(float out[HISTORY_S])
 {
     xSemaphoreTake(lock, portMAX_DELAY);
     memcpy(out, recent, sizeof recent);
@@ -122,19 +122,19 @@ static void alarm(state_t *s, int bit, bool on)
 /* Least squares over the last minute. Returns false without a clear rise. */
 static bool rise_rate(float *per_s)
 {
-    if (recent_count < WINDOW_S) {
+    if (recent_count < HISTORY_S) {
         return false;
     }
-    const float mid = (WINDOW_S - 1) / 2.0f;
+    const float mid = (HISTORY_S - 1) / 2.0f;
     float num = 0, den = 0;
-    for (int i = 0; i < WINDOW_S; i++) {
+    for (int i = 0; i < HISTORY_S; i++) {
         num += (i - mid) * recent[i];
         den += (i - mid) * (i - mid);
     }
     *per_s = num / den;
     /* Hysteresis, so a slow rise does not toggle the estimate. */
     static bool known;
-    known = *per_s * WINDOW_S >= (known ? MIN_RISE_C / 2 : MIN_RISE_C);
+    known = *per_s * HISTORY_S >= (known ? MIN_RISE_C / 2 : MIN_RISE_C);
     return known;
 }
 
@@ -252,8 +252,8 @@ static void evaluate(state_t *s)
         bool frozen = n->temp_valid && n->temp_c <= FREEZE_C;
         if (n->temp_valid) {
             memmove(recent, recent + 1, sizeof recent - sizeof recent[0]);
-            recent[WINDOW_S - 1] = n->temp_c;
-            recent_count += recent_count < WINDOW_S;
+            recent[HISTORY_S - 1] = n->temp_c;
+            recent_count += recent_count < HISTORY_S;
         } else {
             recent_count = 0;
         }
@@ -290,7 +290,7 @@ static void evaluate(state_t *s)
         alarm(s, ALARM_MAINS, !n->mains);
     }
     if (n->battery_valid) {
-        alarm(s, ALARM_BATTERY_LOW, n->battery <= 0.2f);
+        alarm(s, ALARM_BATTERY_LOW, n->battery <= BATTERY_LOW);
         alarm(s, ALARM_BATTERY_CRITICAL, n->battery <= 0.1f);
     }
     alarm(s, ALARM_LOG, journal_full());

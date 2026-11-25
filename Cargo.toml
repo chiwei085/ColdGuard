@@ -8,6 +8,9 @@ resolver = "3"
 edition = "2024"
 rust-version = "1.100"
 
-# Keep rendering smooth in development.
+# Keep simulation and rendering smooth in development.
+[profile.dev]
+opt-level = 1
+
 [profile.dev.package."*"]
 opt-level = 3

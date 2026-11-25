@@ -1,8 +1,7 @@
 //! Stock table on the terminal screen and the custody panel it opens.
 
 use crate::{
-    Live,
-    batches::{self, closed},
+    Live, batches,
     hud::{IDLE, MUTED, PANEL, Sent, WARNING, label},
     link::Link,
     scene::{badge, scan},
@@ -18,7 +17,6 @@ use sim_core::{Action, Batch, Entry, Frame, NodeId, batch_tag};
 const SCREEN: UVec2 = UVec2::new(640, 360);
 const GOOD: Color = Color::srgb(0.3, 0.85, 0.5);
 const BAD: Color = Color::srgb(1.0, 0.35, 0.3);
-const SHOWN_EVENTS: usize = 3;
 const SHOWN_RECORDS: usize = 12;
 
 pub fn plugin(app: &mut App) {
@@ -34,6 +32,15 @@ pub enum Panel {
     Closed,
     All,
     Batch(String),
+}
+
+impl Panel {
+    pub fn toggle(&mut self) {
+        *self = match self {
+            Self::Closed => Self::All,
+            _ => Self::Closed,
+        };
+    }
 }
 
 #[derive(Resource, Default)]
@@ -122,10 +129,7 @@ fn column(node: Node) -> Node {
 
 fn toggle(input: Res<ButtonInput<KeyCode>>, mut open: ResMut<PanelOpen>) {
     if input.just_pressed(KeyCode::Tab) {
-        open.0 = match open.0 {
-            Panel::Closed => Panel::All,
-            _ => Panel::Closed,
-        };
+        open.0.toggle();
     }
 }
 
@@ -135,12 +139,12 @@ struct Shown {
     connected: bool,
     open: Panel,
     delivered: u8,
-    travel: f64,
+    at_receiver: bool,
     batches: Vec<Batch>,
     person: String,
     transit: u64,
     receiver: bool,
-    events: Vec<(String, bool)>,
+    event: Option<(String, bool)>,
     records: Vec<(String, bool)>,
 }
 
@@ -176,12 +180,12 @@ impl Shown {
         Self {
             connected: f.inventory.online,
             delivered: frame.world.delivered,
-            travel: if frame.world.travel < 1.0 { 0.0 } else { 1.0 },
+            at_receiver: frame.world.travel >= 1.0,
             batches: f.batches.clone(),
             person: f.inventory.person.clone(),
             transit: f.carrier.transit,
             receiver: f.carrier.receiver,
-            events: last(SHOWN_EVENTS, &mut told),
+            event: told.next(),
             records,
             open,
         }
@@ -248,6 +252,9 @@ fn refresh(
     panel: Single<(Entity, &mut Node), With<PanelRoot>>,
     mut last: Local<Option<Shown>>,
 ) {
+    if !live.is_changed() && !open.is_changed() && last.is_some() {
+        return;
+    }
     let shown = Shown::new(live.0.as_ref(), open.0.clone());
     if last.as_ref() == Some(&shown) {
         return;
@@ -309,7 +316,7 @@ fn draw_screen(p: &mut ChildSpawnerCommands, s: &Shown) {
             ],
         ));
     }
-    for (text, bad) in s.events.iter().rev().take(1) {
+    if let Some((text, bad)) = &s.event {
         p.spawn(label(text, 24.0, if *bad { WARNING } else { MUTED }));
     }
 }
@@ -344,8 +351,8 @@ fn draw_panel(p: &mut ChildSpawnerCommands, s: &Shown) {
         });
     }
     if s.open == Panel::All {
-        let carrier = match (s.transit, s.travel) {
-            (1, 0.0) => "BOX-1 on the way",
+        let carrier = match (s.transit, s.at_receiver) {
+            (1, false) => "BOX-1 on the way",
             (1, _) => "BOX-1 at the receiver",
             (2, _) => "BOX-1 arrived",
             _ => "BOX-1",
@@ -354,7 +361,7 @@ fn draw_panel(p: &mut ChildSpawnerCommands, s: &Shown) {
             p.spawn(label(carrier, 14.0, MUTED));
             // The person at the box presents the badge there.
             let commands: &[(&str, &str, &str)] = match (s.transit, s.receiver) {
-                (1, _) if s.travel < 1.0 => &[],
+                (1, _) if !s.at_receiver => &[],
                 (1, _) => &[("Arrive", "arrive", "handed over")],
                 (2, _) if s.batches.iter().all(|b| b.phase != "pending") => {
                     &[("Return", "return", "")]
@@ -374,8 +381,8 @@ fn draw_panel(p: &mut ChildSpawnerCommands, s: &Shown) {
     }
 }
 
-fn close_button(p: &mut ChildSpawnerCommands) {
-    p.spawn((
+fn chip(text: &str) -> impl Bundle + use<> {
+    (
         Button,
         Node {
             padding: UiRect::axes(px(10), px(5)),
@@ -383,9 +390,13 @@ fn close_button(p: &mut ChildSpawnerCommands) {
             ..default()
         },
         BackgroundColor(IDLE),
-        children![label("Close", 13.0, Color::WHITE)],
-    ))
-    .observe(|_: On<Activate>, mut open: ResMut<PanelOpen>| open.0 = Panel::Closed);
+        children![label(text, 13.0, Color::WHITE)],
+    )
+}
+
+fn close_button(p: &mut ChildSpawnerCommands) {
+    p.spawn(chip("Close"))
+        .observe(|_: On<Activate>, mut open: ResMut<PanelOpen>| open.0 = Panel::Closed);
 }
 
 /// Offers only what may apply. The firmware decides.
@@ -413,11 +424,7 @@ fn choices(b: &Batch) -> &'static [(&'static str, &'static str, &'static str)] {
 /// The batch tag goes past the reader before the command.
 fn operate(cmd: &str, batch: &str, note: &str) -> Vec<Action> {
     let node = NodeId::Inventory;
-    let tag = Action::Scan {
-        node,
-        uid: batch_tag(batch),
-        garbled: false,
-    };
+    let tag = Action::scan(node, batch_tag(batch));
     vec![tag, command(node, cmd, batch, note)]
 }
 
@@ -456,17 +463,7 @@ fn command(node: NodeId, cmd: &str, batch: &str, note: &str) -> Action {
 }
 
 fn button(p: &mut ChildSpawnerCommands, text: &str, actions: Vec<Action>) {
-    p.spawn((
-        Button,
-        Node {
-            padding: UiRect::axes(px(10), px(5)),
-            border_radius: BorderRadius::all(px(6)),
-            ..default()
-        },
-        BackgroundColor(IDLE),
-        children![label(text, 13.0, Color::WHITE)],
-    ))
-    .observe(
+    p.spawn(chip(text)).observe(
         move |_: On<Activate>,
               live: Res<Live>,
               link: Res<Link>,
@@ -484,7 +481,7 @@ fn button(p: &mut ChildSpawnerCommands, text: &str, actions: Vec<Action>) {
                     let held = opened.0.iter_mut().find(|(n, _)| n == id);
                     if let Some(held) = held {
                         held.1 = now + DOOR_MS;
-                    } else if closed(f, *id) {
+                    } else if !f.world.node(*id).door_open() {
                         link.act(Action::Door {
                             node: *id,
                             open: true,

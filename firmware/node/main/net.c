@@ -69,8 +69,7 @@ static void telemetry(void)
                      s.now.temp_c, s.now.temp_valid, s.now.battery * 100, s.now.battery_mv,
                      s.now.door_open, s.now.mains, s.relay, (unsigned long)s.lock, s.excursion,
                      (long)s.safe_s, s.transit, s.receiver_ready,
-                     s.person[0] && now_ms() - s.person_ms < BADGE_MS ? s.person : "",
-                     journal_backlog());
+                     s.person, journal_backlog());
     bool first = true;
     for (int i = 0; i < ALARMS; i++) {
         if (s.alarms & 1u << i) {
@@ -88,10 +87,10 @@ static void telemetry(void)
 
 static void samples(void)
 {
-    float t[60];
+    float t[HISTORY_S];
     char body[640] = "[";
     int count = control_recent(t), n = 1;
-    for (int i = 60 - count; i < 60; i++) {
+    for (int i = HISTORY_S - count; i < HISTORY_S; i++) {
         n += snprintf(body + n, sizeof body - n, "%s%.2f", n > 1 ? "," : "", t[i]);
     }
     snprintf(body + n, sizeof body - n, "]");
@@ -105,13 +104,14 @@ static void deliver(void)
         uint32_t boot, seq;
         int64_t at;
     } sent[WINDOW];
-    record_t r;
-    int slot;
-    for (int i = 0; i < WINDOW && journal_pending(i, &r, &slot); i++) {
+    static record_t batch[WINDOW];
+    int count = journal_pending(batch, WINDOW);
+    for (int i = 0; i < count; i++) {
+        const record_t *r = &batch[i];
         int free = 0;
         bool waiting = false;
         for (int k = 0; k < WINDOW; k++) {
-            if (sent[k].boot == r.boot && sent[k].seq == r.seq) {
+            if (sent[k].boot == r->boot && sent[k].seq == r->seq) {
                 waiting = now_ms() - sent[k].at < RESEND_MS;
                 free = k;
                 break;
@@ -120,9 +120,9 @@ static void deliver(void)
                 free = k;
             }
         }
-        if (!waiting && send("event", r.type, r.boot, r.seq, r.time_ms, r.body)) {
-            sent[free].boot = r.boot;
-            sent[free].seq = r.seq;
+        if (!waiting && send("event", r->type, r->boot, r->seq, r->time_ms, r->body)) {
+            sent[free].boot = r->boot;
+            sent[free].seq = r->seq;
             sent[free].at = now_ms();
         }
     }
@@ -188,16 +188,14 @@ static void receive(const char *name, int name_len, const char *data, int len)
         return;
     }
     *kind++ = '\0';
-    node_t from = 0;
-    while (from < NODES && strcmp(node, node_names[from]) != 0) {
-        from++;
-    }
-    if (from == NODES) {
+    node_t from = node_find(node);
+    bool own = strcmp(kind, "command") == 0 || strcmp(kind, "ack") == 0;
+    /* The wildcard subscriptions also return the unit's own messages. */
+    if (from == NODES || (!own && from == self)) {
         return;
     }
     cJSON *m = cJSON_ParseWithLength(data, len);
     const char *body = text(m, "body"), *type = text(m, "type"), *sender = text(m, "node_id");
-    bool own = strcmp(kind, "command") == 0 || strcmp(kind, "ack") == 0;
     if (m && body && type && sender && number(m, "version") == 1
         && strcmp(sender, own ? "host" : node) == 0
         && number(m, "checksum") == esp_rom_crc32_le(0, (const uint8_t *)body, strlen(body))) {

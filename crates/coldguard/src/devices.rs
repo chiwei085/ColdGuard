@@ -140,8 +140,7 @@ pub const PIN_RFID_RX: u64 = 18;
 
 /// Levels on the input pins.
 pub fn input_levels(node: &Node) -> [(u64, bool); 2] {
-    let open = node.thermal.as_ref().is_some_and(|t| t.door_open);
-    [(PIN_DOOR, open), (PIN_MAINS, node.mains)]
+    [(PIN_DOOR, node.door_open()), (PIN_MAINS, node.mains)]
 }
 
 #[cfg(test)]

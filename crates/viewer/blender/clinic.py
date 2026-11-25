@@ -489,7 +489,7 @@ for i in range(6):
     box("vent", (F - 0.14, -0.138, z), (F + 0.14, -0.133, z + 0.008), LINER, body, 0.001)
 strip = group("glow_fridge")
 box("led_strip", (F - 0.3, -0.66, 1.688), (F + 0.3, -0.635, 1.698), LED, strip, 0.002)
-for level, z in enumerate((0.44, 0.75, 1.06, 1.37)):
+for z in (0.44, 0.75, 1.06, 1.37):
     thick = [
         [(IX0, IY0, z), (IX1, IY0, z)],
         [(IX0, IY1, z), (IX1, IY1, z)],

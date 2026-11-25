@@ -67,7 +67,9 @@ fn main() {
 }
 
 fn receive(link: Res<Link>, mut live: ResMut<Live>) {
-    live.0 = link.frame();
+    if let Some(new) = link.take() {
+        live.0 = new;
+    }
 }
 
 /// Takes one picture at each simulated time, or one after 8 seconds.

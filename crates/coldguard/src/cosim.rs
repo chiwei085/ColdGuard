@@ -4,6 +4,7 @@ use crate::devices::{
     GAUGE, PIN_BUZZER, PIN_DOOR, PIN_MAINS, PIN_RELAY, PIN_RFID_RX, PIN_RFID_TX, PIN_SCL, PIN_SDA,
     TMP117,
 };
+use sim_core::STEP_MS;
 use std::{
     io::{BufReader, Error, ErrorKind, Read, Result, Write},
     net::{Ipv4Addr, TcpStream},
@@ -29,6 +30,9 @@ const CLAIM_EN: u64 = 19;
 const CLAIM_TIME: u64 = 23;
 
 const BUS_OP_I2C: u64 = 1;
+
+/// One lockstep quantum.
+pub const QUANTUM_NS: u64 = STEP_MS * 1_000_000;
 
 const MAX_FRAME: usize = 256 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -78,7 +82,7 @@ impl Cosim {
                 (CLAIM_EN, vec![]),
             ],
         )?;
-        while !matches!(cosim.event()?, Event::Waiting(_)) {}
+        cosim.wait()?;
         Ok(cosim)
     }
 
@@ -100,11 +104,14 @@ impl Cosim {
             register.extend(bytes(3, &bytes(*field, claim)));
         }
         cosim.send(&bytes(REGISTER, &register))?;
-        let ack = loop {
-            if let Some(ack) = find(&cosim.recv()?, REGISTER_ACK)? {
-                break decode(&ack)?;
+        let raw = loop {
+            let raw = cosim.recv()?;
+            if get(&decode(&raw)?, REGISTER_ACK).is_some() {
+                break raw;
             }
         };
+        let message = decode(&raw)?;
+        let ack = decode(blob(&message, REGISTER_ACK))?;
         if int(&ack, 5) != 1 {
             let reason = String::from_utf8_lossy(blob(&ack, 6)).into_owned();
             return Err(invalid(&format!("esp-emu rejected registration: {reason}")));
@@ -115,8 +122,8 @@ impl Cosim {
     pub fn power_cycle(&mut self) -> Result<()> {
         for level in [false, true] {
             self.enable(level)?;
-            self.grant(1_000_000)?;
-            while !matches!(self.event()?, Event::Waiting(_)) {}
+            self.grant(QUANTUM_NS)?;
+            self.wait()?;
         }
         Ok(())
     }
@@ -151,10 +158,20 @@ impl Cosim {
         self.send(&bytes(BUS_REPLY, &body))
     }
 
+    /// Wait until the chip stops. Return its time in nanoseconds.
+    fn wait(&mut self) -> Result<u64> {
+        loop {
+            if let Event::Waiting(ns) = self.event()? {
+                return Ok(ns);
+            }
+        }
+    }
+
     /// Wait for the next message that matters to a board.
     pub fn event(&mut self) -> Result<Event> {
         loop {
-            let message = decode(&self.recv()?)?;
+            let raw = self.recv()?;
+            let message = decode(&raw)?;
             if get(&message, TIME_WAITING).is_some() {
                 return Ok(Event::Waiting(int(&message, 1)));
             }
@@ -198,10 +215,11 @@ impl Cosim {
         let mut frame = vec![0; len];
         self.reader.read_exact(&mut frame)?;
         let topic = u16::from_le_bytes([frame[0], frame[1]]) as usize;
-        frame
-            .get(2 + topic..)
-            .map(<[u8]>::to_vec)
-            .ok_or_else(|| invalid("Invalid cosim topic length"))
+        if 2 + topic > len {
+            return Err(invalid("Invalid cosim topic length"));
+        }
+        frame.drain(..2 + topic);
+        Ok(frame)
     }
 }
 
@@ -212,30 +230,21 @@ impl Clock {
     /// Return the stopped time in nanoseconds.
     pub fn claim(port: u16, deadline: Duration) -> Result<(Self, u64)> {
         let mut clock = Clock(Cosim::register(port, deadline, &[(CLAIM_TIME, vec![])])?);
-        let now = clock.wait()?;
+        let now = clock.0.wait()?;
         Ok((clock, now))
     }
 
     /// Advance by one grant. Return the stopped time in nanoseconds.
     pub fn advance(&mut self, ns: u64) -> Result<u64> {
         self.0.grant(ns)?;
-        self.wait()
-    }
-
-    fn wait(&mut self) -> Result<u64> {
-        loop {
-            let message = decode(&self.0.recv()?)?;
-            if get(&message, TIME_WAITING).is_some() {
-                return Ok(int(&message, 1));
-            }
-        }
+        self.0.wait()
     }
 }
 
 #[derive(Debug, PartialEq)]
-enum Field {
+enum Field<'a> {
     Int(u64),
-    Bytes(Vec<u8>),
+    Bytes(&'a [u8]),
 }
 
 fn invalid(message: &str) -> Error {
@@ -280,7 +289,7 @@ fn read_varint(buf: &mut &[u8]) -> Result<u64> {
     Err(invalid("Protobuf varint is too long"))
 }
 
-fn decode(mut buf: &[u8]) -> Result<Vec<(u64, Field)>> {
+fn decode(mut buf: &[u8]) -> Result<Vec<(u64, Field<'_>)>> {
     let mut out = vec![];
     while !buf.is_empty() {
         let tag = read_varint(&mut buf)?;
@@ -297,13 +306,13 @@ fn decode(mut buf: &[u8]) -> Result<Vec<(u64, Field)>> {
         let (head, rest) = buf
             .split_at_checked(len)
             .ok_or_else(|| invalid("Truncated protobuf message"))?;
-        out.push((tag >> 3, Field::Bytes(head.to_vec())));
+        out.push((tag >> 3, Field::Bytes(head)));
         buf = rest;
     }
     Ok(out)
 }
 
-fn get(message: &[(u64, Field)], field: u64) -> Option<&Field> {
+fn get<'a, 'b>(message: &'b [(u64, Field<'a>)], field: u64) -> Option<&'b Field<'a>> {
     message.iter().find(|(n, _)| *n == field).map(|(_, v)| v)
 }
 
@@ -314,18 +323,11 @@ fn int(message: &[(u64, Field)], field: u64) -> u64 {
     }
 }
 
-fn blob(message: &[(u64, Field)], field: u64) -> &[u8] {
+fn blob<'a>(message: &[(u64, Field<'a>)], field: u64) -> &'a [u8] {
     match get(message, field) {
         Some(Field::Bytes(b)) => b,
         _ => &[],
     }
-}
-
-fn find(message: &[u8], field: u64) -> Result<Option<Vec<u8>>> {
-    Ok(decode(message)?.into_iter().find_map(|(n, v)| match v {
-        Field::Bytes(b) if n == field => Some(b),
-        _ => None,
-    }))
 }
 
 #[cfg(test)]
@@ -337,8 +339,9 @@ mod tests {
         // Field 40 and length 4. Inner field 1 is 1000000.
         let grant = bytes(TIME_GRANT, &uint(1, 1_000_000));
         assert_eq!(grant, [0xc2, 0x02, 0x04, 0x08, 0xc0, 0x84, 0x3d]);
-        let inner = find(&grant, TIME_GRANT).unwrap().unwrap();
-        assert_eq!(decode(&inner).unwrap(), [(1, Field::Int(1_000_000))]);
+        let message = decode(&grant).unwrap();
+        let inner = blob(&message, TIME_GRANT);
+        assert_eq!(decode(inner).unwrap(), [(1, Field::Int(1_000_000))]);
     }
 
     #[test]

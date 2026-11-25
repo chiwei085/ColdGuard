@@ -6,7 +6,7 @@ use crate::{
     display::Displays,
     hud::{Hint, hint},
     link::Link,
-    stock::{Panel, PanelOpen, ScreenImage},
+    stock::{PanelOpen, ScreenImage},
 };
 use bevy::{
     anti_alias::{
@@ -25,7 +25,7 @@ use bevy::{
     },
     world_serialization::WorldInstanceReady,
 };
-use sim_core::{Action, Node as SimNode, NodeId};
+use sim_core::{Action, NodeId, STAFF_BADGE};
 
 pub fn plugin(app: &mut App) {
     app.insert_resource(ClearColor(Color::BLACK))
@@ -64,8 +64,9 @@ enum LampKind {
     Battery(u8),
 }
 
+/// Lamp inside the fridge.
 #[derive(Component)]
-struct Interior(NodeId);
+struct Interior;
 
 /// Light strip inside the fridge.
 #[derive(Component, Clone)]
@@ -75,9 +76,9 @@ struct FridgeGlow;
 #[derive(Component, Clone)]
 struct RoomGlow;
 
-/// Ceiling light of the clinic and its intensity.
+/// Ceiling light of the clinic.
 #[derive(Component)]
-struct RoomLight(f32);
+struct RoomLight;
 
 /// The box on its trolley.
 #[derive(Component, Default)]
@@ -153,14 +154,6 @@ const VIEWS: [View; 6] = [
     view("receiver", vec3(4.5, 1.15, 0.6), -0.12, 0.12, 3.6),
 ];
 
-pub fn node(frame: &sim_core::Frame, id: NodeId) -> &SimNode {
-    match id {
-        NodeId::Fridge => &frame.world.fridge,
-        NodeId::Carrier => &frame.world.carrier,
-        NodeId::Inventory => &frame.world.inventory,
-    }
-}
-
 /// Display color for the sensor reading. Alarms belong to the firmware.
 pub fn temperature_color(reading: Option<f64>) -> Color {
     match reading {
@@ -178,11 +171,7 @@ pub fn scan() -> Action {
 }
 
 pub fn badge(node: NodeId) -> Action {
-    Action::Scan {
-        node,
-        uid: "04A1B2C3".into(),
-        garbled: false,
-    }
+    Action::scan(node, STAFF_BADGE)
 }
 
 fn model(mut commands: Commands, assets: Res<AssetServer>) {
@@ -285,11 +274,7 @@ fn bind(
                 if matches!(lamp.kind, LampKind::Screen) {
                     commands.entity(entity).observe(
                         |_: On<PointerClick>, mut open: ResMut<PanelOpen>| {
-                            open.0 = if open.0 == Panel::Closed {
-                                Panel::All
-                            } else {
-                                Panel::Closed
-                            };
+                            open.0.toggle();
                         },
                     );
                 }
@@ -312,12 +297,7 @@ fn lamp(name: &str) -> Option<Lamp> {
         None => name.strip_prefix("lamp_")?.split_once('_')?,
     };
     Some(Lamp {
-        node: match node {
-            "fridge" => NodeId::Fridge,
-            "carrier" => NodeId::Carrier,
-            "inventory" => NodeId::Inventory,
-            _ => return None,
-        },
+        node: NodeId::from_name(node)?,
         kind: match kind {
             "temperature" => LampKind::Temperature,
             "power" => LampKind::Power,
@@ -356,7 +336,11 @@ fn own_materials(
 /// Click to open or close the door.
 fn toggle(id: NodeId) -> impl Fn(On<PointerClick>, Res<Live>, Res<Link>) {
     move |_, live, link| {
-        if let Some(t) = live.0.as_ref().and_then(|f| node(f, id).thermal.as_ref()) {
+        if let Some(t) = live
+            .0
+            .as_ref()
+            .and_then(|f| f.world.node(id).thermal.as_ref())
+        {
             link.act(Action::Door {
                 node: id,
                 open: !t.door_open,
@@ -414,7 +398,7 @@ fn lights(mut commands: Commands) {
         ));
         // The receiver has its own supply.
         if x < 3.0 {
-            light.insert(RoomLight(CEILING));
+            light.insert(RoomLight);
         }
     }
     commands.spawn((
@@ -440,7 +424,7 @@ fn lights(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(-0.87, 1.66, 0.62),
-        Interior(NodeId::Fridge),
+        Interior,
     ));
 }
 
@@ -578,15 +562,42 @@ fn hinges(live: Res<Live>, time: Res<Time>, mut hinges: Query<(&mut Hinge, &mut 
         return;
     };
     for (mut hinge, mut transform) in &mut hinges {
-        let open = node(frame, hinge.node)
-            .thermal
-            .as_ref()
-            .is_some_and(|t| t.door_open);
+        let open = frame.world.node(hinge.node).door_open();
         let goal = if open { hinge.open } else { 0.0 };
-        let blend = 1.0 - (-6.0 * time.delta_secs()).exp();
-        hinge.angle += (goal - hinge.angle) * blend;
+        // Still objects must not be extracted again.
+        if (goal - hinge.angle).abs() < 1e-4 {
+            continue;
+        }
+        hinge.angle.smooth_nudge(&goal, 6.0, time.delta_secs());
         transform.rotation = Quat::from_axis_angle(hinge.axis, hinge.angle);
     }
+}
+
+/// A write uploads the material again, so equal values are skipped.
+fn update(
+    materials: &mut Assets<StandardMaterial>,
+    handle: &MeshMaterial3d<StandardMaterial>,
+    same: impl Fn(&StandardMaterial) -> bool,
+    change: impl FnOnce(&mut StandardMaterial),
+) {
+    if materials.get(&handle.0).is_some_and(|m| !same(m))
+        && let Some(mut material) = materials.get_mut(&handle.0)
+    {
+        change(&mut material);
+    }
+}
+
+fn set_emissive(
+    materials: &mut Assets<StandardMaterial>,
+    handle: &MeshMaterial3d<StandardMaterial>,
+    color: LinearRgba,
+) {
+    update(
+        materials,
+        handle,
+        |m| m.emissive == color,
+        |m| m.emissive = color,
+    );
 }
 
 fn lamps(
@@ -599,7 +610,7 @@ fn lamps(
 ) {
     for (lamp, handle) in &lamps {
         let color = live.0.as_ref().map_or(Color::BLACK, |frame| {
-            let n = node(frame, lamp.node);
+            let n = frame.world.node(lamp.node);
             let report = frame.fleet.as_ref().map(|f| f.report(lamp.node));
             let on = |yes, color| {
                 if yes {
@@ -618,9 +629,7 @@ fn lamps(
                         Color::srgb(0.25, 0.0, 0.0)
                     }
                 }
-                LampKind::Temperature => {
-                    temperature_color(n.thermal.as_ref().and_then(|t| t.reading_c()))
-                }
+                LampKind::Temperature => temperature_color(n.reading_c()),
                 LampKind::Power => on(
                     n.mains || n.battery_level > 0.2,
                     Color::srgb(0.1, 0.6, 0.75),
@@ -638,34 +647,47 @@ fn lamps(
                 ),
             }
         });
-        if let Some(mut material) = materials.get_mut(&handle.0) {
-            let image = match lamp.kind {
-                LampKind::Screen => Some(screen.0.clone()),
-                LampKind::Display => displays.image(lamp.node),
-                _ => None,
-            };
-            if image.is_some() {
-                material.base_color = Color::BLACK;
-                material.base_color_texture = None;
-                // Reflections would wash out the text.
-                material.reflectance = 0.0;
-                material.perceptual_roughness = 1.0;
-                material.emissive_texture = image;
-                material.emissive = color.to_linear() * 2.0;
-                continue;
-            }
-            material.base_color = color;
-            material.emissive = color.to_linear() * 4.0;
+        let image = match lamp.kind {
+            LampKind::Screen => Some(screen.0.clone()),
+            LampKind::Display => displays.image(lamp.node),
+            _ => None,
+        };
+        if image.is_some() {
+            let emissive = color.to_linear() * 2.0;
+            update(
+                &mut materials,
+                handle,
+                |m| m.emissive == emissive && m.emissive_texture == image,
+                |m| {
+                    m.base_color = Color::BLACK;
+                    m.base_color_texture = None;
+                    // Reflections would wash out the text.
+                    m.reflectance = 0.0;
+                    m.perceptual_roughness = 1.0;
+                    m.emissive_texture = image.clone();
+                    m.emissive = emissive;
+                },
+            );
+            continue;
         }
+        let emissive = color.to_linear() * 4.0;
+        update(
+            &mut materials,
+            handle,
+            |m| m.base_color == color && m.emissive == emissive,
+            |m| {
+                m.base_color = color;
+                m.emissive = emissive;
+            },
+        );
     }
 }
 
-fn interior(live: Res<Live>, mut lights: Query<(&Interior, &mut PointLight)>) {
+fn interior(live: Res<Live>, mut lights: Query<&mut PointLight, With<Interior>>) {
     let Some(frame) = &live.0 else { return };
-    for (interior, mut light) in &mut lights {
-        let n = node(frame, interior.0);
-        let open = n.thermal.as_ref().is_some_and(|t| t.door_open);
-        light.intensity = match (n.mains, open) {
+    let fridge = &frame.world.fridge;
+    for mut light in &mut lights {
+        light.intensity = match (fridge.mains, fridge.door_open()) {
             (false, _) => 0.0,
             (true, false) => 32_000.0,
             (true, true) => 42_000.0,
@@ -680,31 +702,29 @@ fn glow(
 ) {
     let on = live.0.as_ref().is_some_and(|f| f.world.fridge.mains);
     for handle in &strips {
-        if let Some(mut material) = materials.get_mut(&handle.0) {
-            material.emissive = LinearRgba::WHITE * if on { 6.0 } else { 0.0 };
-        }
+        let power = if on { 6.0 } else { 0.0 };
+        set_emissive(&mut materials, handle, LinearRgba::WHITE * power);
     }
 }
 
 /// The ceiling lights fail with the mains.
 fn room(
     live: Res<Live>,
-    mut lights: Query<(&RoomLight, &mut RectLight)>,
+    mut lights: Query<&mut RectLight, With<RoomLight>>,
     panels: Query<&MeshMaterial3d<StandardMaterial>, With<RoomGlow>>,
     mut environment: Query<&mut GeneratedEnvironmentMapLight>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let on = live.0.as_ref().is_none_or(|f| f.world.fridge.mains);
-    for (full, mut light) in &mut lights {
-        light.intensity = if on { full.0 } else { 0.0 };
+    for mut light in &mut lights {
+        light.intensity = if on { CEILING } else { 0.0 };
     }
     for mut light in &mut environment {
         light.intensity = if on { 430.0 } else { 230.0 };
     }
     for handle in &panels {
-        if let Some(mut material) = materials.get_mut(&handle.0) {
-            material.emissive = LinearRgba::WHITE * if on { 5.0 } else { 0.05 };
-        }
+        let power = if on { 5.0 } else { 0.05 };
+        set_emissive(&mut materials, handle, LinearRgba::WHITE * power);
     }
 }
 
@@ -714,13 +734,15 @@ fn rig(live: Res<Live>, time: Res<Time>, mut rigs: Query<(&mut Rig, &mut Transfo
     };
     let goal = f.world.travel as f32;
     for (mut rig, mut transform) in &mut rigs {
+        if (goal - rig.travel).abs() < 1e-5 {
+            continue;
+        }
         // Smooth between snapshots. A reset does not roll back visibly.
-        let blend = if goal < rig.travel - 0.2 {
-            1.0
+        if goal < rig.travel - 0.2 {
+            rig.travel = goal;
         } else {
-            1.0 - (-10.0 * time.delta_secs()).exp()
-        };
-        rig.travel += (goal - rig.travel) * blend;
+            rig.travel.smooth_nudge(&goal, 10.0, time.delta_secs());
+        }
         let rest = *rig.rest.get_or_insert(transform.translation);
         transform.translation = rest + along(rig.travel);
     }
@@ -768,9 +790,9 @@ fn orbit(
             o.moving = true;
         }
         let view = &VIEWS[o.view];
-        let blend = 1.0 - (-3.0 * time.delta_secs()).exp();
+        let dt = time.delta_secs();
         let focus = view.focus + if view.follow { offset } else { Vec3::ZERO };
-        o.focus = o.focus.lerp(focus, blend);
+        o.focus.smooth_nudge(&focus, 3.0, dt);
         if buttons.pressed(MouseButton::Right) {
             o.yaw -= motion.delta.x * 0.005;
             o.pitch += motion.delta.y * 0.005;
@@ -781,9 +803,9 @@ fn orbit(
             o.moving = false;
         }
         if o.moving {
-            o.yaw += (view.yaw - o.yaw) * blend;
-            o.pitch += (view.pitch - o.pitch) * blend;
-            o.distance += (view.distance - o.distance) * blend;
+            o.yaw.smooth_nudge(&view.yaw, 3.0, dt);
+            o.pitch.smooth_nudge(&view.pitch, 3.0, dt);
+            o.distance.smooth_nudge(&view.distance, 3.0, dt);
         }
         // Keep the camera inside the open side of the room.
         o.yaw = o.yaw.clamp(-0.4, 0.6);

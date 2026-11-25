@@ -1,12 +1,12 @@
 //! One emulated unit in lockstep with the world.
 
 use crate::{
-    cosim::{Cosim, Event},
+    cosim::{Cosim, Event, QUANTUM_NS},
     devices::{self, GAUGE, Gauge, PIN_BUZZER, PIN_RELAY, TMP117, Tmp117, tag_frame},
     smoke::{Emulator, NET, free_port},
     toolchain::Toolchain,
 };
-use sim_core::{Node, NodeId, STEP_MS};
+use sim_core::{Node, NodeId};
 use std::{fs, path::PathBuf, time::Duration};
 
 type Result<T = ()> = std::result::Result<T, String>;
@@ -15,7 +15,6 @@ const CFG_OFFSET: usize = 0x190000;
 const CFG_SIZE: usize = 0x1000;
 const LOG_OFFSET: usize = 0x191000;
 const LOG_SIZE: usize = 0x110000;
-const QUANTUM_NS: u64 = STEP_MS * 1_000_000;
 
 pub struct Board {
     pub id: NodeId,
@@ -23,7 +22,7 @@ pub struct Board {
     cosim: Cosim,
     thermometer: Tmp117,
     gauge: Gauge,
-    levels: [(u64, Option<bool>); 2],
+    levels: [Option<bool>; 2],
     powered: bool,
     scans: u64,
     /// Undriven outputs read high. A board pulls them low.
@@ -75,7 +74,7 @@ impl Board {
             cosim,
             thermometer: Tmp117::default(),
             gauge: Gauge::default(),
-            levels: [(devices::PIN_DOOR, None), (devices::PIN_MAINS, None)],
+            levels: [None; 2],
             powered: true,
             scans: 0,
             driven: [None; 2],
@@ -97,10 +96,10 @@ impl Board {
     /// Apply the world to the pins, then let the chip run one quantum.
     pub fn begin(&mut self, node: &Node) -> Result {
         let io = |e: std::io::Error| e.to_string();
-        for ((pin, last), (_, level)) in self.levels.iter_mut().zip(devices::input_levels(node)) {
+        for (last, (pin, level)) in self.levels.iter_mut().zip(devices::input_levels(node)) {
             if *last != Some(level) {
                 *last = Some(level);
-                self.cosim.drive(*pin, level).map_err(io)?;
+                self.cosim.drive(pin, level).map_err(io)?;
             }
         }
         if self.powered != node.powered {

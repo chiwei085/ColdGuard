@@ -16,8 +16,6 @@
 /* Three missed heartbeats. */
 #define OFFLINE_MS 15000
 #define DEPART_STABLE_S 300
-#define DEPART_BATTERY 0.2f
-#define DEPART_SAFE_S ((5 + 15 + 15) * 60)
 
 enum { IN_FRIDGE, IN_CARRIER, IN_QUARANTINE, AT_RECEIVER, IN_DISCARD };
 enum { STORED, IN_TRANSIT, PENDING, CHECKED_OUT };
@@ -412,10 +410,10 @@ static const char *handle_carrier(const char *cmd, const state_t *s)
         if (!s->now.temp_valid || s->stable_s < DEPART_STABLE_S) {
             return "temperature not stable";
         }
-        if (!s->now.battery_valid || s->now.battery < DEPART_BATTERY) {
+        if (!s->now.battery_valid || s->now.battery < BATTERY_LOW) {
             return "battery";
         }
-        if (s->safe_s < DEPART_SAFE_S) {
+        if (s->safe_s < TRANSPORT_S) {
             return "safe time";
         }
         if (s->now.door_open) {
@@ -455,9 +453,8 @@ static void on_command(const message_t *m, const cJSON *body)
         return;
     }
     state_t s = state_get();
-    bool badge = s.person[0] && now_ms() - s.person_ms < BADGE_MS;
     const char *why = NULL;
-    if (!badge) {
+    if (!s.person[0]) {
         why = "badge required";
     } else if (journal_full()) {
         why = "log full";
@@ -493,7 +490,7 @@ static void on_command(const message_t *m, const cJSON *body)
     }
     journal_add(CRITICAL, "op",
                 "{\"cmd\":\"%s\",\"batch\":\"%s\",\"ok\":0,\"person\":\"%s\",\"why\":\"%s\"}", cmd, name,
-                badge ? s.person : "", why);
+                s.person, why);
 }
 
 static void application(void *arg)
@@ -505,7 +502,7 @@ static void application(void *arg)
             xSemaphoreTake(lock, portMAX_DELAY);
             if (body && strcmp(m.kind, "command") == 0) {
                 on_command(&m, body);
-            } else if (body && self == INVENTORY && m.from != INVENTORY) {
+            } else if (body && self == INVENTORY) {
                 on_peer(&m, body);
             }
             xSemaphoreGive(lock);

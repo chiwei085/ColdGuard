@@ -3,11 +3,10 @@
 use crate::{
     Live,
     hud::Hint,
-    scene::node,
     stock::{Panel, PanelOpen},
 };
 use bevy::{platform::collections::HashMap, prelude::*};
-use sim_core::{Batch, Frame, NodeId};
+use sim_core::{Batch, Frame};
 
 const MOVE_S: f32 = 1.8;
 const ARC_M: f32 = 0.45;
@@ -158,15 +157,18 @@ fn arrange(
         }
         let end = c.place.and_then(|p| Some((p, at(p, c.index)?)));
         let Some(end) = end else {
-            *visibility = Visibility::Hidden;
+            visibility.set_if_neq(Visibility::Hidden);
             continue;
         };
-        *visibility = Visibility::Inherited;
+        visibility.set_if_neq(Visibility::Inherited);
         let start = c.from.and_then(|p| Some((p, at(p, c.index)?)));
-        transform.translation = match start {
+        let position = match start {
             Some(start) if c.moved < 1.0 => route(start, end, c.moved),
             _ => end.1,
         };
+        if transform.translation != position {
+            transform.translation = position;
+        }
     }
 }
 
@@ -174,17 +176,12 @@ fn tags(live: Res<Live>, mut tags: Query<(&UnusableTag, &mut Visibility)>) {
     let Some(f) = &live.0 else { return };
     for (tag, mut visibility) in &mut tags {
         let locked = record(f, tag.0).is_some_and(|b| b.status != "ok");
-        *visibility = if locked {
+        visibility.set_if_neq(if locked {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
+        });
     }
-}
-
-/// Whether a door or lid is shut.
-pub fn closed(f: &Frame, id: NodeId) -> bool {
-    node(f, id).thermal.as_ref().is_some_and(|t| !t.door_open)
 }
 
 #[cfg(test)]

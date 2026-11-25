@@ -3,7 +3,7 @@
 use crate::{
     Live,
     link::Link,
-    scene::{node, scan, temperature_color},
+    scene::{scan, temperature_color},
 };
 use bevy::{
     picking::hover::Hovered,
@@ -98,17 +98,14 @@ enum Op {
 /// Whether an operation is in effect, and whether it is a fault.
 fn state(op: Op, f: &Frame) -> (bool, bool) {
     let fridge = &f.world.fridge;
-    let thermal = |id| node(f, id).thermal.as_ref();
+    let thermal = f.world.fridge.thermal.as_ref();
     match op {
-        Op::Door(id) => (thermal(id).is_some_and(|t| t.door_open), false),
+        Op::Door(id) => (f.world.node(id).door_open(), false),
         Op::Mains => (!fridge.mains, true),
         Op::Relay => (fridge.relay_on, false),
-        Op::CoolingFault => (
-            thermal(NodeId::Fridge).is_some_and(|t| t.cooling_efficiency == 0.0),
-            true,
-        ),
+        Op::CoolingFault => (thermal.is_some_and(|t| t.cooling_efficiency == 0.0), true),
         Op::SensorFault => (
-            thermal(NodeId::Fridge).is_some_and(|t| t.sensor == Sensor::Disconnected),
+            thermal.is_some_and(|t| t.sensor == Sensor::Disconnected),
             true,
         ),
         Op::Network => (!f.world.inventory.network_up, true),
@@ -374,16 +371,21 @@ fn cards(
 ) {
     let Some(f) = &live.0 else {
         for (_, mut text, mut color) in &mut readings {
-            text.0 = "--".into();
-            color.0 = MUTED;
+            set_text(&mut text, "--".into());
+            color.set_if_neq(TextColor(MUTED));
         }
         return;
     };
     for (id, mut text, mut color) in &mut readings {
-        let n = node(f, id.0);
+        let n = f.world.node(id.0);
         let Some(t) = &n.thermal else {
-            text.0 = if n.powered { "READY" } else { "OFF" }.into();
-            color.0 = if n.powered { Color::WHITE } else { MUTED };
+            let (state, shade) = if n.powered {
+                ("READY", Color::WHITE)
+            } else {
+                ("OFF", MUTED)
+            };
+            set_text(&mut text, state.into());
+            color.set_if_neq(TextColor(shade));
             continue;
         };
         let reading = match &f.fleet {
@@ -393,20 +395,18 @@ fn cards(
                 .filter(|_| fleet.report(id.0).online),
             None => t.reading_c().filter(|_| n.powered),
         };
-        text.0 = reading.map_or("NO DATA".into(), |c| format!("{c:.1} C"));
-        color.0 = temperature_color(reading);
+        let value = reading.map_or("NO DATA".into(), |c| format!("{c:.1} C"));
+        set_text(&mut text, value);
+        color.set_if_neq(TextColor(temperature_color(reading)));
     }
     for (id, mut text, mut layout) in &mut details {
-        text.0 = match &f.fleet {
-            Some(fleet) => reported(fleet.report(id.0), node(f, id.0)),
-            None => exceptions(id.0, node(f, id.0)),
-        }
-        .join("\n");
-        layout.display = if text.0.is_empty() {
-            Display::None
-        } else {
-            Display::Flex
+        let n = f.world.node(id.0);
+        let list = match &f.fleet {
+            Some(fleet) => reported(fleet.report(id.0), n),
+            None => exceptions(id.0, n),
         };
+        let value = (!list.is_empty()).then(|| list.join("\n"));
+        show(&mut text, &mut layout, value);
     }
 }
 
@@ -434,7 +434,7 @@ fn reported(r: &Report, n: &sim_core::Node) -> Vec<String> {
 
 fn exceptions(id: NodeId, n: &sim_core::Node) -> Vec<String> {
     let mut list = Vec::new();
-    if n.thermal.as_ref().is_some_and(|t| t.door_open) {
+    if n.door_open() {
         list.push("open".into());
     }
     // The carrier always runs on its battery.
@@ -450,42 +450,54 @@ fn exceptions(id: NodeId, n: &sim_core::Node) -> Vec<String> {
 
 fn clock(live: Res<Live>, mut clocks: Query<&mut Text, With<Clock>>) {
     for mut text in &mut clocks {
-        text.0 = match &live.0 {
+        let value = match &live.0 {
             None => "Connecting".into(),
             Some(f) => {
                 let s = f.world.time_ms / 1000;
                 format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
             }
         };
+        set_text(&mut text, value);
     }
 }
 
 fn speed(live: Res<Live>, mut labels: Query<&mut Text, With<SpeedLabel>>) {
     let Some(f) = &live.0 else { return };
     for mut text in &mut labels {
-        text.0 = format!("{}x", f.speed);
+        set_text(&mut text, format!("{}x", f.speed));
     }
 }
 
 fn buttons(live: Res<Live>, mut query: Query<(&Op, &Hovered, &mut BackgroundColor)>) {
     for (op, hovered, mut color) in &mut query {
-        color.0 = match live.0.as_ref().map(|f| state(*op, f)) {
+        let shade = match live.0.as_ref().map(|f| state(*op, f)) {
             Some((true, true)) => FAULT,
             Some((true, false)) => ACTIVE,
             _ if hovered.0 => HOVER,
             _ => IDLE,
         };
+        color.set_if_neq(BackgroundColor(shade));
     }
 }
 
-fn show(text: &mut Text, node: &mut Node, value: Option<String>) {
-    node.display = if value.is_some() {
+/// A write lays the text out again, so equal values are skipped.
+pub fn set_text(text: &mut Mut<Text>, value: String) {
+    if text.0 != value {
+        text.0 = value;
+    }
+}
+
+fn show(text: &mut Mut<Text>, node: &mut Mut<Node>, value: Option<String>) {
+    let display = if value.is_some() {
         Display::Flex
     } else {
         Display::None
     };
-    if let Some(value) = value.filter(|v| *v != text.0) {
-        text.0 = value;
+    if node.display != display {
+        node.display = display;
+    }
+    if let Some(value) = value {
+        set_text(text, value);
     }
 }
 
@@ -522,10 +534,10 @@ fn outcome(
         (None, Some(e)) => crate::stock::describe(e),
         _ => None,
     };
-    color.0 = match &shown {
+    color.set_if_neq(TextColor(match &shown {
         Some((_, true)) => WARNING,
         _ => Color::WHITE,
-    };
+    }));
     show(&mut text, &mut node, shown.map(|(t, _)| t));
 }
 
@@ -535,7 +547,9 @@ fn tooltip(
     tip: Single<(&mut Text, &mut Node), With<Tooltip>>,
 ) {
     let (mut text, mut node) = tip.into_inner();
-    if let Some(p) = window.cursor_position() {
+    if hint.0.is_some()
+        && let Some(p) = window.cursor_position()
+    {
         node.left = px(p.x + 16.0);
         node.top = px(p.y + 12.0);
     }

@@ -12,7 +12,8 @@ use std::{
 
 #[derive(Default)]
 struct Shared {
-    frame: Option<Frame>,
+    /// Not yet taken. Inner none is a lost connection.
+    frame: Option<Option<Frame>>,
     stream: Option<TcpStream>,
 }
 
@@ -30,11 +31,14 @@ impl Link {
                     shared.lock().unwrap().stream = stream.try_clone().ok();
                     for line in BufReader::new(stream).lines().map_while(Result::ok) {
                         match serde_json::from_str(&line) {
-                            Ok(frame) => shared.lock().unwrap().frame = Some(frame),
+                            Ok(frame) => shared.lock().unwrap().frame = Some(Some(frame)),
                             Err(_) => break,
                         }
                     }
-                    *shared.lock().unwrap() = Shared::default();
+                    *shared.lock().unwrap() = Shared {
+                        frame: Some(None),
+                        stream: None,
+                    };
                 }
                 sleep(Duration::from_millis(200));
             }
@@ -42,9 +46,9 @@ impl Link {
         link
     }
 
-    /// Latest state, or none when disconnected.
-    pub fn frame(&self) -> Option<Frame> {
-        self.0.lock().unwrap().frame.clone()
+    /// News since the last call.
+    pub fn take(&self) -> Option<Option<Frame>> {
+        self.0.lock().unwrap().frame.take()
     }
 
     pub fn send(&self, control: &Control) {

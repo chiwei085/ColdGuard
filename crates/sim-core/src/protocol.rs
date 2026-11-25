@@ -89,6 +89,9 @@ pub struct Entry {
     pub body: String,
 }
 
+/// RFID tag of the demo staff.
+pub const STAFF_BADGE: &str = "04A1B2C3";
+
 /// RFID tag on a batch. Names end in a two digit number.
 pub fn batch_tag(name: &str) -> String {
     let digits = name.get(name.len().saturating_sub(2)..);

@@ -180,12 +180,12 @@ void journal_post(kind_t kind, const char *type, const char *fmt, ...)
     }
 }
 
-bool journal_pending(int n, record_t *out, int *slot)
+int journal_pending(record_t *out, int max)
 {
     slot_t s;
-    bool found = false;
+    int found = 0;
     xSemaphoreTake(lock, portMAX_DELAY);
-    for (int i = 0; i < span; i++) {
+    for (int i = 0; i < span && found < max; i++) {
         int at = (tail + i) % slots;
         if (!load(at, &s) || !s.unacked) {
             /* Drop the confirmed front so later searches stay short. */
@@ -196,17 +196,13 @@ bool journal_pending(int n, record_t *out, int *slot)
             }
             continue;
         }
-        if (n-- == 0) {
-            *slot = at;
-            out->boot = s.boot;
-            out->seq = s.seq;
-            out->time_ms = s.time_ms;
-            out->kind = s.kind;
-            memcpy(out->type, s.type, sizeof out->type);
-            memcpy(out->body, s.body, sizeof out->body);
-            found = true;
-            break;
-        }
+        record_t *r = &out[found++];
+        r->boot = s.boot;
+        r->seq = s.seq;
+        r->time_ms = s.time_ms;
+        r->kind = s.kind;
+        memcpy(r->type, s.type, sizeof r->type);
+        memcpy(r->body, s.body, sizeof r->body);
     }
     xSemaphoreGive(lock);
     return found;

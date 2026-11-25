@@ -130,7 +130,7 @@ fn idf_tools(t: &Toolchain) -> Result {
 fn esp_emu(t: &Toolchain) -> Result {
     let want = &t.m.esp_emu;
     let bin = t.esp_emu();
-    if bin.is_file() && verify(t, &bin, &want.binary_sha256).is_ok() {
+    if bin.is_file() && t.verify(&bin, &want.binary_sha256).is_ok() {
         return Ok(());
     }
     let tmp = t.tools().join("esp-emu.tmp");
@@ -140,7 +140,7 @@ fn esp_emu(t: &Toolchain) -> Result {
     fs::create_dir_all(&tmp)?;
     let archive = tmp.join("esp-emu.tar.gz");
     download(t, &want.url, &archive)?;
-    verify(t, &archive, &want.archive_sha256)?;
+    t.verify(&archive, &want.archive_sha256)?;
     check(
         t.plain("tar")
             .args(["--strip-components=1", "--no-same-owner", "-xzf"])
@@ -148,7 +148,7 @@ fn esp_emu(t: &Toolchain) -> Result {
             .arg("-C")
             .arg(&tmp),
     )?;
-    verify(t, &tmp.join("esp-emu"), &want.binary_sha256)?;
+    t.verify(&tmp.join("esp-emu"), &want.binary_sha256)?;
     fs::create_dir_all(bin.parent().ok_or("Invalid esp-emu path")?)?;
     fs::rename(tmp.join("esp-emu"), &bin)?;
     fs::remove_dir_all(&tmp)?;
@@ -202,13 +202,4 @@ fn download(t: &Toolchain, url: &str, to: &Path) -> Result {
     )?;
     fs::rename(&part, to)?;
     Ok(())
-}
-
-fn verify(t: &Toolchain, file: &Path, want: &str) -> Result {
-    let got = t.output("sha256sum", &[&file.to_string_lossy()])?;
-    if got.split_whitespace().next() == Some(want) {
-        Ok(())
-    } else {
-        Err(format!("SHA-256 mismatch: {got}").into())
-    }
 }

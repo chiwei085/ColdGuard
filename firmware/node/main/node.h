@@ -10,12 +10,19 @@ typedef enum { FRIDGE, CARRIER, INVENTORY, NODES } node_t;
 
 extern const char *const node_names[NODES];
 extern node_t self;
+/* Returns NODES for an unknown name. */
+node_t node_find(const char *name);
 extern char broker_uri[64];
 
 #define BODY_MAX 216
 #define UID_LEN 8
 /* A badge authorizes operations at its node for this long. */
 #define BADGE_MS 60000
+/* Temperatures kept for the rise estimate and the samples message. */
+#define HISTORY_S 60
+/* Packing, travel and margin. */
+#define TRANSPORT_S ((5 + 15 + 15) * 60)
+#define BATTERY_LOW 0.2f
 
 /* Alarm bits. Names are in control.c. */
 enum {
@@ -66,14 +73,14 @@ typedef struct {
 
 int64_t now_ms(void);
 
-/* Safe from any task. */
+/* Safe from any task. The person is empty once the badge has expired. */
 state_t state_get(void);
 void state_transit(uint8_t transit, bool receiver_ready);
 void state_person(const char *uid);
 
 /* Boots the buses. Sampling and tag reading never block on the network. */
 void bus_init(void);
-bool bus_sample(sample_t *out);
+void bus_sample(sample_t *out);
 void bus_relay(bool on);
 void bus_buzzer(bool on);
 /* Waits for a frame. Returns false and an empty string for a corrupt one. */
@@ -81,7 +88,7 @@ bool bus_tag(char uid[UID_LEN + 1]);
 
 void control_start(void);
 /* Last minute of temperatures, oldest first. Returns the count. */
-int control_recent(float out[60]);
+int control_recent(float out[HISTORY_S]);
 
 typedef enum { SUMMARY, CRITICAL } kind_t;
 
@@ -101,8 +108,8 @@ bool journal_add(kind_t kind, const char *type, const char *fmt, ...)
 /* Queued, for tasks that must not wait for flash. */
 void journal_post(kind_t kind, const char *type, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
-/* Reads the n-th unacknowledged record. */
-bool journal_pending(int n, record_t *out, int *slot);
+/* Reads the oldest unacknowledged records. Returns the count. */
+int journal_pending(record_t *out, int max);
 void journal_ack(uint32_t boot, uint32_t seq);
 int journal_backlog(void);
 bool journal_full(void);

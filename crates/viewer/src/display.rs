@@ -2,8 +2,8 @@
 
 use crate::{
     Live,
-    hud::{MUTED, WARNING, label},
-    scene::{node, temperature_color},
+    hud::{MUTED, WARNING, label, set_text},
+    scene::temperature_color,
     stock::target,
 };
 use bevy::prelude::*;
@@ -65,19 +65,20 @@ fn refresh(
 ) {
     let Some(f) = &live.0 else { return };
     for (id, mut text, mut color) in &mut readings {
-        let n = node(f, id.0);
-        let reading = n.thermal.as_ref().and_then(|t| t.reading_c());
-        text.0 = match reading {
+        let n = f.world.node(id.0);
+        let reading = n.reading_c();
+        let value = match reading {
             _ if !n.powered => String::new(),
             Some(c) => format!("{c:.1} C"),
             None => "SENSOR".into(),
         };
-        color.0 = temperature_color(reading);
+        set_text(&mut text, value);
+        color.set_if_neq(TextColor(temperature_color(reading)));
     }
     for (id, mut text, mut color) in &mut states {
-        let n = node(f, id.0);
+        let n = f.world.node(id.0);
         if !n.powered {
-            text.0.clear();
+            set_text(&mut text, String::new());
             continue;
         }
         let report = f.fleet.as_ref().map(|fleet| fleet.report(id.0));
@@ -92,11 +93,12 @@ fn refresh(
         let link = if online { "ONLINE" } else { "NO NETWORK" };
         let alarm = report.is_some_and(|r| r.buzzer);
         let alarm = if alarm { "  ALARM" } else { "" };
-        text.0 = format!("{power}\n{link}{alarm}");
-        color.0 = if alarm.is_empty() && online {
+        set_text(&mut text, format!("{power}\n{link}{alarm}"));
+        let shade = if alarm.is_empty() && online {
             Color::WHITE
         } else {
             WARNING
         };
+        color.set_if_neq(TextColor(shade));
     }
 }

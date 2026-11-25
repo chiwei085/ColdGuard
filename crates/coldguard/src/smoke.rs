@@ -1,6 +1,9 @@
 //! End-to-end checks with temporary brokers and emulators.
 
-use crate::{cosim::Clock, toolchain::Toolchain};
+use crate::{
+    cosim::{Clock, QUANTUM_NS},
+    toolchain::Toolchain,
+};
 use serde_json::Value;
 use std::{
     fs,
@@ -17,7 +20,6 @@ type Result<T = ()> = std::result::Result<T, String>;
 
 const BOOT_MARKER: &str = "COLDGUARD_BOOT_OK";
 const MQTT_MARKER: &str = "COLDGUARD_MQTT_OK";
-const QUANTUM_NS: u64 = 1_000_000;
 // Pin the subnet used by the firmware.
 pub const NET: &str = "user,net=192.168.4.0/24";
 

@@ -250,10 +250,7 @@ fn receive(
     let (Some(name), Some(kind)) = (parts.next(), parts.next()) else {
         return Err("bad topic".into());
     };
-    let id = NodeId::ALL
-        .into_iter()
-        .find(|n| n.name() == name)
-        .ok_or("unknown node")?;
+    let id = NodeId::from_name(name).ok_or("unknown node")?;
     let e = open(payload, id).ok_or("bad envelope")?;
     match kind {
         "heartbeat" => {
@@ -271,9 +268,9 @@ fn receive(
         "event" => {
             // Confirm only after the record is durable.
             let new = db
-                .execute(
-                    "INSERT OR IGNORE INTO records VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
+                .prepare_cached("INSERT OR IGNORE INTO records VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
+                .and_then(|mut s| {
+                    s.execute(params![
                         session,
                         name,
                         e.boot_id,
@@ -281,8 +278,8 @@ fn receive(
                         e.sim_time_ms as i64,
                         e.r#type,
                         e.body
-                    ],
-                )
+                    ])
+                })
                 .map_err(|e| e.to_string())?;
             let ack = json!({"boot_id": e.boot_id, "seq": e.seq});
             publish(client, id, "ack", e.boot_id, e.seq, ack)?;

@@ -1,7 +1,14 @@
 //! Headless acceptance of the firmware in closed loop.
 
-use crate::{board::Board, lab::Lab, toolchain::Toolchain};
-use sim_core::{Action, NodeId, STEP_MS, Scenario, Sensor, Simulation, batch_tag};
+use crate::{
+    board::Board,
+    lab::{Lab, exchange},
+    toolchain::Toolchain,
+};
+use sim_core::{
+    Action, Entry, NodeId, Report, STAFF_BADGE as NURSE, STEP_MS, Scenario, Sensor, Simulation,
+    batch_tag,
+};
 use std::{
     thread::sleep,
     time::{Duration, Instant},
@@ -34,7 +41,6 @@ const CASES: [(&str, Case); 18] = [
 const FRIDGE: NodeId = NodeId::Fridge;
 const CARRIER: NodeId = NodeId::Carrier;
 const INVENTORY: NodeId = NodeId::Inventory;
-const NURSE: &str = "04A1B2C3";
 
 /// Run the named cases, or all of them.
 pub fn run(t: &Toolchain, names: &[String]) -> Result<bool> {
@@ -83,16 +89,17 @@ impl Solo {
     }
 
     fn step(&mut self) -> Result<()> {
-        let world = self.sim.world();
-        self.board.begin(&world.fridge)?;
-        self.board.finish(&world.fridge, world.time_ms)?;
-        let on = self.board.relay();
-        self.sim.apply(&Action::Relay { node: FRIDGE, on })?;
+        exchange(std::slice::from_mut(&mut self.board), &mut self.sim)?;
         self.sim.step().map(|_| ())
     }
 
     fn run(&mut self, seconds: u64) -> Result<()> {
         (0..seconds * 1000 / STEP_MS).try_for_each(|_| self.step())
+    }
+
+    fn probe(&self) -> f64 {
+        let thermal = self.sim.world().fridge.thermal.as_ref();
+        thermal.map_or(0.0, |t| t.probe_c)
     }
 
     /// Wait for a relay level. Return the world time.
@@ -127,21 +134,9 @@ fn closed_loop(t: &Toolchain) -> Result {
     let mut s = Solo::start(t, 6.0)?;
     let on = s.relay(true, 10)?;
     let off = s.relay(false, 1800)?;
-    let cold = s
-        .sim
-        .world()
-        .fridge
-        .thermal
-        .as_ref()
-        .map_or(0.0, |t| t.probe_c);
+    let cold = s.probe();
     let again = s.relay(true, 3600)?;
-    let warm = s
-        .sim
-        .world()
-        .fridge
-        .thermal
-        .as_ref()
-        .map_or(0.0, |t| t.probe_c);
+    let warm = s.probe();
     if (cold - 4.5).abs() > 0.1 || (warm - 5.5).abs() > 0.1 {
         return Err(format!("switched at {cold:.2} and {warm:.2} C"));
     }
@@ -165,12 +160,8 @@ fn history(board: &Board) -> Result<(Vec<String>, Vec<u64>)> {
     for slot in board.log()?.chunks(256) {
         if slot.starts_with(&[0x1d, 0xc0]) {
             what.push(format!("{} {}", text(&slot[24..36]), text(&slot[36..252])));
-            when.push(
-                slot[16..24]
-                    .iter()
-                    .rev()
-                    .fold(0, |n, b| n << 8 | u64::from(*b)),
-            );
+            let time = slot[16..24].try_into().map_err(|_| "short slot")?;
+            when.push(u64::from_le_bytes(time));
         }
     }
     Ok((what, when))
@@ -189,11 +180,7 @@ fn repeatable(t: &Toolchain) -> Result {
             node: FRIDGE,
             open: true,
         })?;
-        s.sim.apply(&Action::Scan {
-            node: FRIDGE,
-            uid: NURSE.into(),
-            garbled: false,
-        })?;
+        s.sim.apply(&Action::scan(FRIDGE, NURSE))?;
         s.run(90)?;
         s.sim.apply(&Action::Door {
             node: FRIDGE,
@@ -244,11 +231,7 @@ impl Drop for Net {
 impl Net {
     fn start(t: &Toolchain) -> Result<Self> {
         let mut net = Self::load(t, simulation(5.0)?)?;
-        net.until("all units online", 30, |n| {
-            NodeId::ALL
-                .iter()
-                .all(|id| n.lab.fleet().report(*id).online)
-        })?;
+        net.until("all units online", 30, |n| n.all(|r| r.online))?;
         Ok(net)
     }
 
@@ -300,6 +283,11 @@ impl Net {
         ))
     }
 
+    fn all(&self, holds: impl Fn(&Report) -> bool) -> bool {
+        let fleet = self.lab.fleet();
+        NodeId::ALL.iter().all(|id| holds(fleet.report(*id)))
+    }
+
     fn act(&mut self, action: Action) -> Result<()> {
         self.sim.apply(&action)
     }
@@ -314,11 +302,7 @@ impl Net {
     }
 
     fn badge(&mut self, node: NodeId) -> Result<()> {
-        self.act(Action::Scan {
-            node,
-            uid: NURSE.into(),
-            garbled: false,
-        })?;
+        self.act(Action::scan(node, NURSE))?;
         self.until("badge", 5, |n| n.lab.fleet().report(node).person == NURSE)
             .map(|_| ())
     }
@@ -327,11 +311,7 @@ impl Net {
     fn operate(&mut self, node: NodeId, cmd: &str, batch: &str, note: &str) -> Result<String> {
         self.badge(node)?;
         if !batch.is_empty() {
-            self.act(Action::Scan {
-                node,
-                uid: batch_tag(batch),
-                garbled: false,
-            })?;
+            self.act(Action::scan(node, batch_tag(batch)))?;
         }
         self.command(node, cmd, batch, note)
     }
@@ -374,16 +354,17 @@ impl Net {
     }
 
     fn bodies(&self, node: NodeId, kind: &str) -> Vec<serde_json::Value> {
-        let events = self.lab.fleet().events;
-        let own = events.iter().filter(|e| e.node == node && e.kind == kind);
-        own.filter_map(|e| serde_json::from_str(&e.body).ok())
-            .collect()
+        self.parsed(|e| e.node == node && e.kind == kind)
     }
 
     fn ops(&self) -> Vec<serde_json::Value> {
+        self.parsed(|e| e.kind == "op")
+    }
+
+    fn parsed(&self, keep: impl Fn(&Entry) -> bool) -> Vec<serde_json::Value> {
         let events = self.lab.fleet().events;
-        let ops = events.iter().filter(|e| e.kind == "op");
-        ops.filter_map(|e| serde_json::from_str(&e.body).ok())
+        let kept = events.iter().filter(|e| keep(e));
+        kept.filter_map(|e| serde_json::from_str(&e.body).ok())
             .collect()
     }
 
@@ -420,10 +401,7 @@ fn three_nodes(t: &Toolchain) -> Result {
         for _ in 0..1000 {
             n.step()?;
         }
-        if !NodeId::ALL
-            .iter()
-            .all(|id| n.lab.fleet().report(*id).online)
-        {
+        if !n.all(|r| r.online) {
             return Err("a unit went offline".into());
         }
     }
@@ -449,11 +427,7 @@ fn messaging(t: &Toolchain) -> Result {
             ));
         }
     }
-    n.until("backlog confirmed", 20, |n| {
-        NodeId::ALL
-            .iter()
-            .all(|id| n.lab.fleet().report(*id).backlog == 0)
-    })?;
+    n.until("backlog confirmed", 20, |n| n.all(|r| r.backlog == 0))?;
     Ok("telemetry 1 s, heartbeat 5 s, all records confirmed".into())
 }
 
@@ -776,11 +750,7 @@ fn log_full(t: &Toolchain) -> Result {
     n.expect(INVENTORY, "checkin", "VAX-01", "", "ok")?;
     n.lab.hub.reject.store(true, Ordering::Relaxed);
     for _ in 0..4600 {
-        n.act(Action::Scan {
-            node: INVENTORY,
-            uid: NURSE.into(),
-            garbled: false,
-        })?;
+        n.act(Action::scan(INVENTORY, NURSE))?;
         for _ in 0..60 {
             n.step()?;
         }
@@ -794,11 +764,7 @@ fn log_full(t: &Toolchain) -> Result {
         return Err(format!("full at {held} records"));
     }
     n.badge(INVENTORY)?;
-    n.act(Action::Scan {
-        node: INVENTORY,
-        uid: batch_tag("VAX-01"),
-        garbled: false,
-    })?;
+    n.act(Action::scan(INVENTORY, batch_tag("VAX-01")))?;
     n.act(Action::Operate {
         node: INVENTORY,
         cmd: "checkout".into(),

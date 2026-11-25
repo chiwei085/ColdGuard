@@ -28,6 +28,10 @@ impl NodeId {
             Self::Inventory => "inventory",
         }
     }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|n| n.name() == name)
+    }
 }
 
 /// Engineering defaults. Calibrate here, not in the equations.
@@ -58,12 +62,6 @@ pub struct ThermalConfig {
     pub cooling_w: f64,
     /// Glycol probe time constant.
     pub probe_tau_s: f64,
-}
-
-impl Default for ThermalConfig {
-    fn default() -> Self {
-        Config::default().fridge
-    }
 }
 
 impl Default for Config {
@@ -203,6 +201,17 @@ pub enum Action {
     },
 }
 
+impl Action {
+    /// Present an intact tag.
+    pub fn scan(node: NodeId, uid: impl Into<String>) -> Self {
+        Self::Scan {
+            node,
+            uid: uid.into(),
+            garbled: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Thermal {
     pub air_c: f64,
@@ -212,8 +221,6 @@ pub struct Thermal {
     /// Actual heat removal.
     pub cooling_w: f64,
     pub sensor: Sensor,
-    #[serde(skip)]
-    config: ThermalConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -262,7 +269,6 @@ impl World {
                 cooling_efficiency: 1.0,
                 cooling_w: 0.0,
                 sensor: Sensor::Ok,
-                config: c.clone(),
             }),
             relay_on: false,
             mains,
@@ -358,9 +364,9 @@ impl World {
     /// Advance by one fixed step.
     pub fn step(&mut self) {
         let (ambient, config) = (self.ambient_c, &self.config);
-        for node in [&mut self.fridge, &mut self.carrier, &mut self.inventory] {
-            node.step(ambient, config);
-        }
+        self.fridge.step(ambient, config, Some(&config.fridge));
+        self.carrier.step(ambient, config, Some(&config.carrier));
+        self.inventory.step(ambient, config, None);
         let way = STEP_S / config.travel_s * if self.away { 1.0 } else { -1.0 };
         self.travel = (self.travel + way).clamp(0.0, 1.0);
         self.time_ms += STEP_MS;
@@ -375,7 +381,16 @@ impl World {
 }
 
 impl Node {
-    fn step(&mut self, ambient: f64, config: &Config) {
+    pub fn door_open(&self) -> bool {
+        self.thermal.as_ref().is_some_and(|t| t.door_open)
+    }
+
+    /// Sensor reading, or none without a working sensor.
+    pub fn reading_c(&self) -> Option<f64> {
+        self.thermal.as_ref()?.reading_c()
+    }
+
+    fn step(&mut self, ambient: f64, config: &Config, thermal: Option<&ThermalConfig>) {
         let battery_w = if self.mains {
             config.charge_w
         } else {
@@ -384,8 +399,8 @@ impl Node {
         let delta = battery_w * STEP_H / config.battery_capacity_wh;
         self.battery_level = (self.battery_level + delta).clamp(0.0, 1.0);
         self.powered = self.mains || self.battery_level > 0.0;
-        if let Some(t) = &mut self.thermal {
-            t.step(ambient, self.relay_on && self.mains);
+        if let (Some(t), Some(c)) = (&mut self.thermal, thermal) {
+            t.step(c, ambient, self.relay_on && self.mains);
         }
     }
 }
@@ -400,8 +415,7 @@ impl Thermal {
         }
     }
 
-    fn step(&mut self, ambient: f64, cooling: bool) {
-        let c = &self.config;
+    fn step(&mut self, c: &ThermalConfig, ambient: f64, cooling: bool) {
         let leak = if self.door_open {
             c.open_w_per_k
         } else {

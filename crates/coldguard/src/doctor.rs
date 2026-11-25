@@ -1,7 +1,6 @@
 //! Read-only toolchain checks with evidence and fixes.
 
 use crate::{
-    manifest::Manifest,
     smoke,
     toolchain::{Toolchain, check_venv, find_in, idf_tools, user_path},
 };
@@ -19,7 +18,6 @@ pub enum Status {
     Ok,
     Warn,
     Fail,
-    Todo,
 }
 
 #[derive(Serialize)]
@@ -34,7 +32,6 @@ pub struct Check {
 
 struct Doctor<'a> {
     t: &'a Toolchain,
-    m: &'a Manifest,
     layer: &'static str,
     checks: Vec<Check>,
 }
@@ -42,7 +39,6 @@ struct Doctor<'a> {
 pub fn run(t: &Toolchain) -> Vec<Check> {
     let mut d = Doctor {
         t,
-        m: &t.m,
         layer: "Host",
         checks: vec![],
     };
@@ -74,7 +70,6 @@ pub fn print(checks: &[Check]) {
             Status::Ok => "✓",
             Status::Warn => "!",
             Status::Fail => "✗",
-            Status::Todo => "·",
         };
         println!("  {mark} {}: {}", c.id, c.evidence);
         if let Some(fix) = &c.fix {
@@ -83,15 +78,20 @@ pub fn print(checks: &[Check]) {
     }
     let n = |s| checks.iter().filter(|c| c.status == s).count();
     println!(
-        "\n{} passed, {} warnings, {} failed, {} not implemented",
+        "\n{} passed, {} warnings, {} failed",
         n(Status::Ok),
         n(Status::Warn),
-        n(Status::Fail),
-        n(Status::Todo)
+        n(Status::Fail)
     );
 }
 
 impl Doctor<'_> {
+    fn at_least(&self, have: &str, want: &str) -> bool {
+        self.t
+            .output("dpkg", &["--compare-versions", have, "ge", want])
+            .is_ok()
+    }
+
     fn add(
         &mut self,
         id: impl Into<String>,
@@ -99,7 +99,7 @@ impl Doctor<'_> {
         evidence: impl Into<String>,
         fix: Option<String>,
     ) {
-        let fix = fix.filter(|_| matches!(status, Status::Warn | Status::Fail));
+        let fix = fix.filter(|_| status != Status::Ok);
         self.checks.push(Check {
             layer: self.layer,
             id: id.into(),
@@ -110,7 +110,7 @@ impl Doctor<'_> {
     }
 
     fn host(&mut self) {
-        let h = &self.m.host;
+        let h = &self.t.m.host;
         let os = fs::read_to_string("/etc/os-release").unwrap_or_default();
         let field = |key: &str| {
             os.lines()
@@ -184,7 +184,7 @@ impl Doctor<'_> {
 
     fn apt(&mut self) {
         let mut args = vec!["-W", "-f", "${Package}\t${db:Status-Status}\t${Version}\n"];
-        args.extend(self.m.apt.keys().map(String::as_str));
+        args.extend(self.t.m.apt.keys().map(String::as_str));
         // Exit 1 means unknown packages. stdout is still valid.
         let out = match self.t.command(Path::new("dpkg-query")).args(&args).output() {
             Ok(o) if matches!(o.status.code(), Some(0 | 1)) => o,
@@ -200,21 +200,19 @@ impl Doctor<'_> {
         };
         let installed = parse_dpkg(&String::from_utf8_lossy(&out.stdout));
         let bad: Vec<String> = self
+            .t
             .m
             .apt
             .iter()
             .filter(|(name, min)| match installed.get(*name) {
                 None => true,
                 Some(_) if min.is_empty() => false,
-                Some(v) => self
-                    .t
-                    .output("dpkg", &["--compare-versions", v, "ge", min])
-                    .is_err(),
+                Some(v) => !self.at_least(v, min),
             })
             .map(|(name, _)| name.clone())
             .collect();
         if bad.is_empty() {
-            let n = self.m.apt.len();
+            let n = self.t.m.apt.len();
             self.add(
                 "System packages",
                 Status::Ok,
@@ -243,11 +241,7 @@ impl Doctor<'_> {
             .as_ref()
             .ok()
             .and_then(|v| v.split_whitespace().nth(1))
-            .is_some_and(|v| {
-                self.t
-                    .output("dpkg", &["--compare-versions", v, "ge", want])
-                    .is_ok()
-            });
+            .is_some_and(|v| self.at_least(v, want));
         self.add(
             "Rust",
             ok_or(good, Status::Fail),
@@ -271,7 +265,7 @@ impl Doctor<'_> {
 
     fn esp_idf(&mut self) {
         let idf = self.t.idf();
-        let want = &self.m.esp_idf;
+        let want = &self.t.m.esp_idf;
         if !idf.join(".git").exists() {
             return self.add(
                 "ESP-IDF",
@@ -347,7 +341,7 @@ impl Doctor<'_> {
     }
 
     fn python(&mut self) {
-        let want = &self.m.python;
+        let want = &self.t.m.python;
         let uv = find_in(user_path(), "uv")
             .ok_or("uv not found".to_string())
             .and_then(|p| self.t.output(p, &["--version"]));
@@ -355,11 +349,7 @@ impl Doctor<'_> {
             .as_ref()
             .ok()
             .and_then(|s| s.split_whitespace().nth(1))
-            .is_some_and(|v| {
-                self.t
-                    .output("dpkg", &["--compare-versions", v, "ge", &want.min_uv])
-                    .is_ok()
-            });
+            .is_some_and(|v| self.at_least(v, &want.min_uv));
         self.add(
             "uv",
             ok_or(good, Status::Fail),
@@ -390,20 +380,15 @@ impl Doctor<'_> {
     }
 
     fn esp_emu(&mut self) {
-        let want = &self.m.esp_emu;
+        let want = &self.t.m.esp_emu;
         let bin = self.t.esp_emu();
         let fix = setup_fix();
         if !bin.is_file() {
             let evidence = format!("{} does not exist", bin.display());
             return self.add("esp-emu", Status::Fail, evidence, fix);
         }
-        let sum = self.t.output("sha256sum", &[&bin.to_string_lossy()]);
-        let matches = sum
-            .as_ref()
-            .is_ok_and(|s| s.split_whitespace().next() == Some(&want.binary_sha256));
-        if !matches {
-            let evidence = sum.map_or_else(|e| e, |s| format!("SHA-256 mismatch: {s}"));
-            return self.add("esp-emu", Status::Fail, evidence, fix);
+        if let Err(e) = self.t.verify(&bin, &want.binary_sha256) {
+            return self.add("esp-emu", Status::Fail, e, fix);
         }
         let got = self.t.output(&bin, &["--version"]);
         let good = got
@@ -467,7 +452,7 @@ impl Doctor<'_> {
     }
 
     fn runtime(&mut self) {
-        let port = self.m.mqtt.port;
+        let port = self.t.m.mqtt.port;
         let bound = TcpListener::bind((Ipv4Addr::LOCALHOST, port));
         self.add(
             "MQTT port",
@@ -543,7 +528,7 @@ impl Doctor<'_> {
         self.add(
             "Firmware and IDF version",
             ok_or(got.is_ok(), Status::Fail),
-            got.map_or_else(|e| e, |_| self.m.esp_idf.version.clone()),
+            got.map_or_else(|e| e, |_| self.t.m.esp_idf.version.clone()),
             setup_fix(),
         );
     }

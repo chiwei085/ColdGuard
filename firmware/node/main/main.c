@@ -11,6 +11,15 @@ const char *const node_names[NODES] = {"fridge", "carrier", "inventory"};
 node_t self;
 char broker_uri[64];
 
+node_t node_find(const char *name)
+{
+    node_t n = 0;
+    while (n < NODES && strcmp(name, node_names[n]) != 0) {
+        n++;
+    }
+    return n;
+}
+
 int64_t now_ms(void)
 {
     return esp_timer_get_time() / 1000;
@@ -29,17 +38,15 @@ static bool configure(void)
     if (sscanf(text, "%15s %d", name, &port) != 2 || port < 0 || port > 65535) {
         return false;
     }
-    for (self = 0; self < NODES; self++) {
-        if (strcmp(name, node_names[self]) == 0) {
-            /* Port 0 is a standalone unit. */
-            if (port == 0) {
-                return true;
-            }
-            snprintf(broker_uri, sizeof broker_uri, "mqtt://192.168.4.1:%d", port);
-            return true;
-        }
+    self = node_find(name);
+    if (self == NODES) {
+        return false;
     }
-    return false;
+    /* Port 0 is a standalone unit. */
+    if (port != 0) {
+        snprintf(broker_uri, sizeof broker_uri, "mqtt://192.168.4.1:%d", port);
+    }
+    return true;
 }
 
 void app_main(void)
