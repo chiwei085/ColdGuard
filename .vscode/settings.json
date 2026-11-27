@@ -1,0 +1,12 @@
+{
+    "clangd.path": "${workspaceFolder}/scripts/clangd",
+    "clangd.useScriptAsExecutable": true,
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "files.associations": {
+        "firmware/**/*.h": "c"
+    },
+    "[c]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+        "editor.formatOnSave": true
+    }
+}

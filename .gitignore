@@ -1,6 +1,7 @@
 /Proposal_for_Final_Project_Group8.pdf
 /target/
 /.tools/
+/.cache/
 /firmware/*/build/
 /firmware/*/managed_components/
 /firmware/*/sdkconfig

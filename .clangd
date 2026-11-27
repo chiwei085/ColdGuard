@@ -1,0 +1,18 @@
+CompileFlags:
+  BuiltinHeaders: QueryDriver
+  Remove:
+    - -fno-shrink-wrap
+    - -fstrict-volatile-bitfields
+    - -fno-tree-switch-conversion
+    - -fzero-init-padding-bits=*
+    - -fno-malloc-dce
+---
+If:
+  PathMatch: firmware/node/.*
+CompileFlags:
+  CompilationDatabase: .tools/node
+---
+If:
+  PathMatch: firmware/smoke/.*
+CompileFlags:
+  CompilationDatabase: .tools/smoke
