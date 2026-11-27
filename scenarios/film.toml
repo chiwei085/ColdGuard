@@ -1,0 +1,520 @@
+# Presentation cut of the main story. Same firmware rules, with waits cut
+# from the video. story.toml stays the full run for acceptance and questions.
+duration_ms = 398_000
+snapshot_ms = 1000
+
+[config]
+ambient_c = 30.0
+batches = 4
+
+[config.fridge]
+initial_c = 5.0
+heat_capacity_j_per_k = 20_000.0
+closed_w_per_k = 1.5
+open_w_per_k = 15.0
+cooling_w = 150.0
+probe_tau_s = 60.0
+
+[[caption]]
+at_ms = 0
+chapter = "1 / 6  Check-in"
+text = "Every second the fridge, the box and the terminal report."
+view = "clinic"
+
+[[caption]]
+at_ms = 3_000
+text = "Badge first, then the batch tag. Time and staff are logged."
+view = "terminal"
+
+[[caption]]
+at_ms = 8_000
+text = "The other batches follow."
+view = "clinic"
+video_speed = 4.0
+
+[[caption]]
+at_ms = 16_000
+text = "One batch is dispensed."
+view = "clinic"
+
+[[caption]]
+at_ms = 21_000
+chapter = "2 / 6  Outage"
+text = "Power is cut. Cooling stops. Monitoring runs on battery."
+view = "fridge"
+
+[[caption]]
+at_ms = 29_000
+text = "Safe time cannot be trusted yet, so transport is advised."
+view = "fridge"
+
+[[caption]]
+at_ms = 37_000
+chapter = "3 / 6  Departure"
+text = "Clinic B confirms it can receive. The box is checked first."
+view = "carrier"
+
+[[caption]]
+at_ms = 41_000
+text = "Refused. The box has not held 2 to 8 C for five minutes."
+view = "carrier"
+
+[[caption]]
+at_ms = 47_000
+text = "Each batch is scanned into the box."
+view = "clinic"
+
+[[caption]]
+at_ms = 52_000
+text = "VAX-02 and VAX-03 follow."
+view = "clinic"
+video_speed = 4.0
+
+[[caption]]
+at_ms = 60_000
+text = ""
+view = "carrier"
+video_cut = true
+
+[[caption]]
+at_ms = 299_000
+text = "Five minutes later. Every condition holds. Departure accepted."
+view = "carrier"
+
+[[caption]]
+at_ms = 306_000
+chapter = "4 / 6  Lost contact"
+text = "On the way the box loses contact."
+view = "box"
+
+[[caption]]
+at_ms = 310_000
+text = "Three heartbeats missed."
+view = "box"
+video_speed = 6.0
+
+[[caption]]
+at_ms = 332_000
+text = "The clinic marks the box offline at its last reading. The box keeps measuring and logging."
+view = "box"
+
+[[caption]]
+at_ms = 340_000
+text = "No contact, no proof. Use is refused."
+view = "terminal"
+
+[[caption]]
+at_ms = 347_000
+text = ""
+view = "box"
+video_cut = true
+
+[[caption]]
+at_ms = 362_000
+chapter = "5 / 6  Handover"
+text = "The box reaches Clinic B. Contact comes back."
+view = "receiver"
+
+[[caption]]
+at_ms = 368_000
+text = "Records missed offline upload with their original times."
+view = "receiver"
+video_speed = 3.0
+
+[[caption]]
+at_ms = 384_000
+text = "The receiver signs. Each batch is accepted, then usable."
+view = "receiver"
+video_speed = 2.0
+
+[[event]]
+at_ms = 3_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 4_000
+action = "door"
+node = "fridge"
+open = true
+
+[[event]]
+at_ms = 5_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 5_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 9_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 9_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-02"
+
+[[event]]
+at_ms = 11_000
+action = "scan"
+node = "inventory"
+uid = "B1000003"
+
+[[event]]
+at_ms = 11_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-03"
+
+[[event]]
+at_ms = 13_000
+action = "scan"
+node = "inventory"
+uid = "B1000004"
+
+[[event]]
+at_ms = 13_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-04"
+
+[[event]]
+at_ms = 17_000
+action = "scan"
+node = "inventory"
+uid = "B1000004"
+
+[[event]]
+at_ms = 17_000
+action = "operate"
+node = "inventory"
+cmd = "checkout"
+batch = "VAX-04"
+
+[[event]]
+at_ms = 20_000
+action = "door"
+node = "fridge"
+open = false
+
+[[event]]
+at_ms = 22_000
+action = "mains"
+node = "fridge"
+on = false
+
+[[event]]
+at_ms = 37_000
+action = "scan"
+node = "carrier"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 39_000
+action = "operate"
+node = "carrier"
+cmd = "receiver"
+note = "clinic B confirmed"
+
+[[event]]
+at_ms = 41_000
+action = "operate"
+node = "carrier"
+cmd = "depart"
+
+[[event]]
+at_ms = 47_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 48_000
+action = "door"
+node = "fridge"
+open = true
+
+[[event]]
+at_ms = 49_000
+action = "door"
+node = "carrier"
+open = true
+
+[[event]]
+at_ms = 50_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 50_000
+action = "operate"
+node = "inventory"
+cmd = "load"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 53_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 53_000
+action = "operate"
+node = "inventory"
+cmd = "load"
+batch = "VAX-02"
+
+[[event]]
+at_ms = 55_000
+action = "scan"
+node = "inventory"
+uid = "B1000003"
+
+[[event]]
+at_ms = 55_000
+action = "operate"
+node = "inventory"
+cmd = "load"
+batch = "VAX-03"
+
+[[event]]
+at_ms = 57_000
+action = "door"
+node = "fridge"
+open = false
+
+[[event]]
+at_ms = 58_000
+action = "door"
+node = "carrier"
+open = false
+
+[[event]]
+at_ms = 300_000
+action = "scan"
+node = "carrier"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 302_000
+action = "operate"
+node = "carrier"
+cmd = "depart"
+
+[[event]]
+at_ms = 308_000
+action = "network"
+node = "carrier"
+up = false
+
+[[event]]
+at_ms = 340_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 342_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 342_000
+action = "operate"
+node = "inventory"
+cmd = "checkout"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 362_000
+action = "network"
+node = "carrier"
+up = true
+
+[[event]]
+at_ms = 382_000
+action = "scan"
+node = "carrier"
+uid = "04D4E5F6"
+
+[[event]]
+at_ms = 384_000
+action = "operate"
+node = "carrier"
+cmd = "arrive"
+note = "handed over"
+
+[[event]]
+at_ms = 385_000
+action = "scan"
+node = "inventory"
+uid = "04D4E5F6"
+
+[[event]]
+at_ms = 386_000
+action = "door"
+node = "carrier"
+open = true
+
+[[event]]
+at_ms = 387_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 387_000
+action = "operate"
+node = "inventory"
+cmd = "accept"
+batch = "VAX-01"
+note = "transport log checked"
+
+[[event]]
+at_ms = 389_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 389_000
+action = "operate"
+node = "inventory"
+cmd = "accept"
+batch = "VAX-02"
+note = "transport log checked"
+
+[[event]]
+at_ms = 391_000
+action = "scan"
+node = "inventory"
+uid = "B1000003"
+
+[[event]]
+at_ms = 391_000
+action = "operate"
+node = "inventory"
+cmd = "accept"
+batch = "VAX-03"
+note = "transport log checked"
+
+[[check]]
+at_ms = 6_000
+batch = "VAX-01 fridge stored ok"
+
+[[check]]
+at_ms = 10_000
+batch = "VAX-02 fridge stored ok"
+
+[[check]]
+at_ms = 12_000
+batch = "VAX-03 fridge stored ok"
+
+[[check]]
+at_ms = 14_000
+batch = "VAX-04 fridge stored ok"
+
+[[check]]
+at_ms = 17_500
+done = "checkout VAX-04"
+batch = "VAX-04 fridge out ok"
+
+[[check]]
+at_ms = 23_000
+alarm = "fridge mains_lost"
+
+[[check]]
+at_ms = 23_500
+alarm = "fridge transport"
+
+[[check]]
+at_ms = 39_500
+done = "receiver"
+
+[[check]]
+at_ms = 41_500
+refused = "depart temperature not stable"
+transit = 0
+
+[[check]]
+at_ms = 50_500
+done = "load VAX-01"
+batch = "VAX-01 carrier stored ok"
+
+[[check]]
+at_ms = 53_500
+done = "load VAX-02"
+batch = "VAX-02 carrier stored ok"
+
+[[check]]
+at_ms = 55_500
+done = "load VAX-03"
+batch = "VAX-03 carrier stored ok"
+
+[[check]]
+at_ms = 302_500
+done = "depart"
+transit = 1
+
+[[check]]
+at_ms = 303_000
+batch = "VAX-01 carrier transit ok"
+
+[[check]]
+at_ms = 320_000
+within_ms = 12_000
+offline = "carrier"
+
+[[check]]
+at_ms = 342_500
+refused = "checkout VAX-01 storage offline"
+
+[[check]]
+at_ms = 361_000
+offline = "carrier"
+
+[[check]]
+at_ms = 364_000
+within_ms = 13_000
+online = "carrier"
+transit = 1
+
+[[check]]
+at_ms = 384_500
+done = "arrive"
+transit = 2
+
+[[check]]
+at_ms = 385_000
+batch = "VAX-01 carrier pending ok"
+
+[[check]]
+at_ms = 387_500
+done = "accept VAX-01"
+batch = "VAX-01 receiver stored ok"
+
+[[check]]
+at_ms = 389_500
+done = "accept VAX-02"
+batch = "VAX-02 receiver stored ok"
+
+[[check]]
+at_ms = 391_500
+done = "accept VAX-03"
+batch = "VAX-03 receiver stored ok"

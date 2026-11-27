@@ -39,6 +39,8 @@ ca-certificates = ""
 ccache = ""
 cmake = "3.22.1"
 curl = ""
+# Encodes scenario videos with libx264.
+ffmpeg = ""
 flex = ""
 git = ""
 gperf = ""

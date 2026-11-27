@@ -34,6 +34,7 @@ cargo run -- exec idf.py --version # 在專案環境中執行指令
 ```sh
 cargo run -- demo                      # 3D 診所與三個韌體節點（加 --no-firmware 只跑物理）；點擊門、箱蓋、員工證（或按 1、2、3），點批次盒直接操作該批次，點終端螢幕或按 Tab 看全部庫存與記錄；4 切換 relay，5–8 注入故障，V 換視角，右鍵拖曳與滾輪控制鏡頭
 cargo run -- demo scenarios/story.toml # 有字幕與運鏡的主線重播；分支為 excursion、failures、refusals
+cargo run -- video film.mp4 scenarios/film.toml scenarios/film-excursion.toml # 約 2 分半的展示片：各劇本先以 1× 跑韌體並檢查，再離線逐幀渲染 1080p60；加 --reuse 只重新渲染
 cargo run -- records --latest          # 匯出主機 SQLite 記錄（JSON lines）
 cargo run -- accept                    # S、B4、F、D2 驗收，可指定項目，例如 accept F1 F2（S4 需 10 分鐘）
 cargo run -- sim scenarios/outage.toml # headless 執行劇本，每行輸出一筆 JSON 快照

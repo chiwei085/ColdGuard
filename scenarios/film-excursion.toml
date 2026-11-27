@@ -1,0 +1,288 @@
+# Presentation cut of the excursion branch, closing with a summary.
+duration_ms = 609_000
+snapshot_ms = 1000
+
+[config]
+ambient_c = 35.0
+batches = 2
+
+[config.fridge]
+initial_c = 5.0
+heat_capacity_j_per_k = 10_000.0
+closed_w_per_k = 1.5
+open_w_per_k = 15.0
+cooling_w = 150.0
+probe_tau_s = 60.0
+
+[[caption]]
+at_ms = 0
+chapter = "6 / 6  Another day: excursion"
+text = "Another day, another scenario. Two batches are stored on a hot day."
+view = "clinic"
+video_speed = 2.0
+
+[[caption]]
+at_ms = 8_000
+text = "The door is left open."
+view = "fridge"
+video_speed = 6.0
+
+[[caption]]
+at_ms = 20_000
+text = ""
+view = "fridge"
+video_cut = true
+
+[[caption]]
+at_ms = 135_000
+text = "The first reading above 8 C locks every batch. Do Not Use."
+view = "fridge"
+
+[[caption]]
+at_ms = 142_000
+text = ""
+view = "fridge"
+video_cut = true
+
+[[caption]]
+at_ms = 214_000
+text = "The door is closed. Use is refused while locked."
+view = "terminal"
+
+[[caption]]
+at_ms = 221_000
+text = ""
+view = "fridge"
+video_cut = true
+
+[[caption]]
+at_ms = 568_000
+text = "Back inside 2 to 8 C. The lock stays."
+view = "fridge"
+
+[[caption]]
+at_ms = 574_000
+text = ""
+view = "terminal"
+video_cut = true
+
+[[caption]]
+at_ms = 580_000
+text = "Release needs a person and a written basis."
+view = "terminal"
+
+[[caption]]
+at_ms = 586_000
+text = ""
+view = "terminal"
+video_cut = true
+
+[[caption]]
+at_ms = 589_000
+text = "After review, one batch is released and one is discarded."
+view = "clinic"
+
+[[caption]]
+at_ms = 600_000
+chapter = "Summary"
+text = "Each node keeps its own safety logic. Faults are caught, unsafe use is refused, and every record is kept."
+view = "clinic"
+
+[[event]]
+at_ms = 8_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 9_000
+action = "door"
+node = "fridge"
+open = true
+
+[[event]]
+at_ms = 10_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 10_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 13_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 13_000
+action = "operate"
+node = "inventory"
+cmd = "checkin"
+batch = "VAX-02"
+
+[[event]]
+at_ms = 210_000
+action = "door"
+node = "fridge"
+open = false
+
+[[event]]
+at_ms = 216_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 218_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 218_000
+action = "operate"
+node = "inventory"
+cmd = "checkout"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 228_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 230_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 230_000
+action = "operate"
+node = "inventory"
+cmd = "quarantine"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 234_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 234_000
+action = "operate"
+node = "inventory"
+cmd = "quarantine"
+batch = "VAX-02"
+
+[[event]]
+at_ms = 580_000
+action = "scan"
+node = "inventory"
+uid = "04A1B2C3"
+
+[[event]]
+at_ms = 582_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 582_000
+action = "operate"
+node = "inventory"
+cmd = "release"
+batch = "VAX-01"
+
+[[event]]
+at_ms = 590_000
+action = "scan"
+node = "inventory"
+uid = "B1000001"
+
+[[event]]
+at_ms = 590_000
+action = "operate"
+node = "inventory"
+cmd = "release"
+batch = "VAX-01"
+note = "maker confirmed stable"
+
+[[event]]
+at_ms = 594_000
+action = "scan"
+node = "inventory"
+uid = "B1000002"
+
+[[event]]
+at_ms = 594_000
+action = "operate"
+node = "inventory"
+cmd = "discard"
+batch = "VAX-02"
+note = "maker rejected"
+
+[[check]]
+at_ms = 11_000
+batch = "VAX-01 fridge stored ok"
+
+[[check]]
+at_ms = 14_000
+batch = "VAX-02 fridge stored ok"
+
+[[check]]
+at_ms = 25_000
+within_ms = 180_000
+alarm = "fridge excursion"
+
+[[check]]
+at_ms = 26_000
+within_ms = 182_000
+batch = "VAX-01 fridge stored dnu"
+
+[[check]]
+at_ms = 26_000
+within_ms = 182_000
+batch = "VAX-02 fridge stored dnu"
+
+[[check]]
+at_ms = 218_500
+refused = "checkout VAX-01 do not use"
+
+[[check]]
+at_ms = 230_500
+batch = "VAX-01 quarantine stored dnu"
+
+[[check]]
+at_ms = 234_500
+batch = "VAX-02 quarantine stored dnu"
+
+[[check]]
+at_ms = 240_000
+within_ms = 330_000
+no_alarm = "fridge excursion"
+
+[[check]]
+at_ms = 571_000
+batch = "VAX-01 quarantine stored dnu"
+no_alarm = "fridge excursion"
+
+[[check]]
+at_ms = 582_500
+refused = "release VAX-01 basis required"
+
+[[check]]
+at_ms = 590_500
+batch = "VAX-01 fridge stored ok"
+
+[[check]]
+at_ms = 594_500
+batch = "VAX-02 discard stored discarded"

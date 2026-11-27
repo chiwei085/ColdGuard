@@ -4,6 +4,7 @@ mod board;
 mod cosim;
 mod devices;
 mod doctor;
+mod film;
 mod hub;
 mod lab;
 mod live;
@@ -59,6 +60,15 @@ enum Command {
         #[arg(long)]
         latest: bool,
     },
+    /// Render scripted replays to one mp4 file. Each runs once at 1x first.
+    Video {
+        out: PathBuf,
+        #[arg(required = true)]
+        scenarios: Vec<PathBuf>,
+        /// Render the last runs again. Captions come from the current files.
+        #[arg(long)]
+        reuse: bool,
+    },
     /// Run a scenario in real time with the 3D viewer.
     Demo {
         #[arg(default_value = "scenarios/demo.toml")]
@@ -99,8 +109,7 @@ fn demo(
     path: &Path,
     headless: bool,
     firmware: bool,
-    shot: Option<&Path>,
-    at: &[u64],
+    viewer_args: &[OsString],
     speed: f64,
 ) -> Result<(), Box<dyn Error>> {
     let scenario = load_scenario(path)?;
@@ -112,6 +121,24 @@ fn demo(
         return live::serve(scenario, units, speed, || false);
     }
     // Build first so the server never waits for the compiler.
+    let mut viewer = std::process::Command::new(viewer(t)?)
+        .args(viewer_args)
+        .spawn()?;
+    let result = live::serve(scenario, units, speed, || {
+        !matches!(viewer.try_wait(), Ok(None))
+    });
+    let _ = viewer.kill();
+    let status = viewer.wait()?;
+    result?;
+    // The server stops only after the viewer exits.
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("viewer {status}").into())
+}
+
+/// Build the viewer and return its path.
+fn viewer(t: &Toolchain) -> Result<PathBuf, Box<dyn Error>> {
     let cargo = t.cargo_bin("cargo").ok_or("cargo not found")?;
     let status = std::process::Command::new(cargo)
         .args(["build", "--package", "viewer"])
@@ -120,18 +147,7 @@ fn demo(
     if !status.success() {
         return Err("viewer build failed".into());
     }
-    let mut viewer = std::process::Command::new(t.root.join("target/debug/viewer"));
-    if let Some(path) = shot {
-        viewer.arg("--screenshot").arg(std::path::absolute(path)?);
-        viewer.args(at.iter().map(u64::to_string));
-    }
-    let mut viewer = viewer.spawn()?;
-    let result = live::serve(scenario, units, speed, || {
-        !matches!(viewer.try_wait(), Ok(None))
-    });
-    let _ = viewer.kill();
-    let _ = viewer.wait();
-    result
+    Ok(t.root.join("target/debug/viewer"))
 }
 
 fn records(t: &Toolchain) -> PathBuf {
@@ -185,16 +201,14 @@ fn run() -> Result<bool, Box<dyn Error>> {
             screenshot,
             at,
             speed,
-        } => demo(
-            &t,
-            &scenario,
-            headless,
-            !no_firmware,
-            screenshot.as_deref(),
-            &at,
-            speed,
-        )
-        .map(|()| true),
+        } => {
+            let mut args: Vec<OsString> = vec![];
+            if let Some(path) = screenshot {
+                args.extend(["--screenshot".into(), std::path::absolute(path)?.into()]);
+                args.extend(at.iter().map(|s| s.to_string().into()));
+            }
+            demo(&t, &scenario, headless, !no_firmware, &args, speed).map(|()| true)
+        }
         Command::Records { latest } => {
             hub::export(&records(&t), latest, &mut io::stdout().lock())?;
             Ok(true)
@@ -203,6 +217,11 @@ fn run() -> Result<bool, Box<dyn Error>> {
             prepare(&t)?;
             Ok(accept::run(&t, &cases)?)
         }
+        Command::Video {
+            out,
+            scenarios,
+            reuse,
+        } => film::run(&t, &out, &scenarios, reuse).map(|()| true),
         Command::Sim { scenario } => sim(&scenario).map(|()| true),
         Command::Exec { command } => {
             // exec returns only on failure.

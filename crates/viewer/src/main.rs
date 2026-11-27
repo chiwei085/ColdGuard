@@ -4,6 +4,7 @@ mod batches;
 mod display;
 mod hud;
 mod link;
+mod render;
 mod scene;
 mod stock;
 
@@ -24,7 +25,9 @@ struct Shots {
     at_ms: Vec<u64>,
 }
 
-fn main() {
+fn main() -> AppExit {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let rendering = args.first().is_some_and(|a| a == "--render");
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins
@@ -36,13 +39,23 @@ fn main() {
                 primary_window: Some(Window {
                     title: "ColdGuard".into(),
                     resolution: (1600, 900).into(),
+                    // Offline frames need not wait for the display.
+                    present_mode: if rendering {
+                        bevy::window::PresentMode::AutoNoVsync
+                    } else {
+                        default()
+                    },
                     ..default()
                 }),
                 ..default()
             }),
         MeshPickingPlugin,
     ))
-    .insert_resource(Link::start())
+    .insert_resource(if rendering {
+        Link::default()
+    } else {
+        Link::start()
+    })
     .init_resource::<Live>()
     .add_systems(PreUpdate, receive)
     .add_plugins((
@@ -53,17 +66,27 @@ fn main() {
         batches::plugin,
     ));
 
-    let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("--screenshot")
-        && let Some(path) = args.next()
+    if rendering {
+        if let Err(e) = render::start(&mut app, &args[1..]) {
+            eprintln!("{e}");
+            return AppExit::error();
+        }
+    } else if args.first().is_some_and(|a| a == "--screenshot")
+        && let Some(path) = args.get(1)
     {
-        let at_ms = args.filter_map(|a| a.parse().ok()).map(|s: u64| s * 1000);
+        let at_ms = args[2..]
+            .iter()
+            .filter_map(|a| a.parse().ok())
+            .map(|s: u64| s * 1000);
         let mut at_ms: Vec<_> = at_ms.collect();
         at_ms.sort_unstable();
-        app.insert_resource(Shots { path, at_ms })
-            .add_systems(Update, screenshot);
+        app.insert_resource(Shots {
+            path: path.clone(),
+            at_ms,
+        })
+        .add_systems(Update, screenshot);
     }
-    app.run();
+    app.run()
 }
 
 fn receive(link: Res<Link>, mut live: ResMut<Live>) {
