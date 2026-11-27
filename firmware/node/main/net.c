@@ -2,6 +2,7 @@
 
 #include "node.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +20,7 @@
 #define WINDOW 8
 #define RESEND_MS 5000
 
-enum { CONNECTED = BIT0, BEAT = BIT1, SAMPLES = BIT2 };
+enum { CONNECTED = BIT0, BEAT = BIT1 };
 
 static esp_mqtt_client_handle_t client;
 static EventGroupHandle_t flags;
@@ -29,72 +30,78 @@ static void topic(char *out, size_t size, const char *node, const char *kind)
     snprintf(out, size, PREFIX "%s/%s", node, kind);
 }
 
+/* Rounds for the wire, so floats print short. */
+static double fixed(double value, double scale)
+{
+    return round(value * scale) / scale;
+}
+
 static bool send(const char *kind, const char *type, uint32_t boot, uint32_t seq, int64_t time_ms,
                  const char *body)
 {
-    static char text[2048], escaped[1536];
-    char *e = escaped;
-    for (const char *c = body; *c && e < escaped + sizeof escaped - 3; c++) {
-        if (*c == '"' || *c == '\\') {
-            *e++ = '\\';
-        }
-        *e++ = *c;
-    }
-    *e = '\0';
+    static char text[2048];
     uint32_t crc = esp_rom_crc32_le(0, (const uint8_t *)body, strlen(body));
-    int n = snprintf(text, sizeof text,
-                     "{\"version\":1,\"node_id\":\"%s\",\"boot_id\":%lu,\"seq\":%lu,"
-                     "\"sim_time_ms\":%lld,\"type\":\"%s\",\"body\":\"%s\",\"checksum\":%lu}",
-                     node_names[self], (unsigned long)boot, (unsigned long)seq, (long long)time_ms,
-                     type, escaped, (unsigned long)crc);
-    if (n >= (int)sizeof text) {
+    cJSON *m = cJSON_CreateObject();
+    /* Printing fails rather than truncate when the buffer is short. */
+    bool built =
+        m && cJSON_AddNumberToObject(m, "version", 1) &&
+        cJSON_AddStringToObject(m, "node_id", node_names[self]) &&
+        cJSON_AddNumberToObject(m, "boot_id", boot) && cJSON_AddNumberToObject(m, "seq", seq) &&
+        cJSON_AddNumberToObject(m, "sim_time_ms", (double)time_ms) &&
+        cJSON_AddStringToObject(m, "type", type) && cJSON_AddStringToObject(m, "body", body) &&
+        cJSON_AddNumberToObject(m, "checksum", crc) &&
+        cJSON_PrintPreallocated(m, text, sizeof text, false);
+    cJSON_Delete(m);
+    if (!built) {
         return false;
     }
     char name[64];
     topic(name, sizeof name, node_names[self], kind);
     int qos = strcmp(kind, "event") == 0;
     /* Queued messages leave one per client loop, which starves the backlog. */
-    int id = esp_mqtt_client_publish(client, name, text, n, qos, 0);
+    int id = esp_mqtt_client_publish(client, name, text, strlen(text), qos, 0);
     return id >= 0;
+}
+
+static bool telemetry_body(cJSON *b, const state_t *s)
+{
+    const char *alarms[ALARMS];
+    int count = 0;
+    for (int i = 0; i < ALARMS; i++) {
+        if (s->alarms & 1u << i) {
+            alarms[count++] = alarm_names[i];
+        }
+    }
+    const sample_t *n = &s->now;
+    return cJSON_AddNumberToObject(b, "temp_c", fixed(n->temp_c, 1000)) &&
+           cJSON_AddNumberToObject(b, "valid", n->temp_valid) &&
+           cJSON_AddNumberToObject(b, "battery", fixed(n->battery * 100, 100)) &&
+           cJSON_AddNumberToObject(b, "battery_mv", n->battery_mv) &&
+           cJSON_AddNumberToObject(b, "door", n->door_open) &&
+           cJSON_AddNumberToObject(b, "mains", n->mains) &&
+           cJSON_AddNumberToObject(b, "relay", s->relay) &&
+           cJSON_AddNumberToObject(b, "lock", s->excursion_count) &&
+           cJSON_AddNumberToObject(b, "excursion", s->excursion) &&
+           cJSON_AddNumberToObject(b, "safe_s", s->safe_s) &&
+           cJSON_AddNumberToObject(b, "transit", s->transit) &&
+           cJSON_AddNumberToObject(b, "receiver", s->receiver_ready) &&
+           cJSON_AddStringToObject(b, "person", s->person) &&
+           cJSON_AddNumberToObject(b, "backlog", journal_backlog()) &&
+           cJSON_AddNumberToObject(b, "door_s", s->door_s) &&
+           cJSON_AddItemToObject(b, "alarms", cJSON_CreateStringArray(alarms, count)) &&
+           app_json(b);
 }
 
 static void telemetry(void)
 {
     state_t s = state_get();
-    char body[1024];
-    int n = snprintf(body, sizeof body,
-                     "{\"temp_c\":%.3f,\"valid\":%d,\"battery\":%.2f,\"battery_mv\":%u,\"door\":%d,"
-                     "\"mains\":%d,\"relay\":%d,\"lock\":%lu,\"excursion\":%d,\"safe_s\":%ld,"
-                     "\"transit\":%d,\"receiver\":%d,\"person\":\"%s\",\"backlog\":%d,\"alarms\":[",
-                     s.now.temp_c, s.now.temp_valid, s.now.battery * 100, s.now.battery_mv,
-                     s.now.door_open, s.now.mains, s.relay, (unsigned long)s.lock, s.excursion,
-                     (long)s.safe_s, s.transit, s.receiver_ready,
-                     s.person, journal_backlog());
-    bool first = true;
-    for (int i = 0; i < ALARMS; i++) {
-        if (s.alarms & 1u << i) {
-            n += snprintf(body + n, sizeof body - n, "%s\"%s\"", first ? "" : ",", alarm_names[i]);
-            first = false;
-        }
+    char text[1024];
+    cJSON *b = cJSON_CreateObject();
+    bool built = b && telemetry_body(b, &s) && cJSON_PrintPreallocated(b, text, sizeof text, false);
+    cJSON_Delete(b);
+    if (built) {
+        send("telemetry", "telemetry", journal_boot(), journal_seq(), now_ms(), text);
     }
-    n += snprintf(body + n, sizeof body - n, "]");
-    if (self == INVENTORY) {
-        n += app_stock_json(body + n, sizeof body - n - 2);
-    }
-    snprintf(body + n, sizeof body - n, "}");
-    send("telemetry", "telemetry", journal_boot(), journal_seq(), now_ms(), body);
-}
-
-static void samples(void)
-{
-    float t[HISTORY_S];
-    char body[640] = "[";
-    int count = control_recent(t), n = 1;
-    for (int i = HISTORY_S - count; i < HISTORY_S; i++) {
-        n += snprintf(body + n, sizeof body - n, "%s%.2f", n > 1 ? "," : "", t[i]);
-    }
-    snprintf(body + n, sizeof body - n, "]");
-    send("telemetry", "samples", journal_boot(), journal_seq(), now_ms(), body);
 }
 
 /* Sends the oldest records first. Unconfirmed ones repeat. */
@@ -132,29 +139,18 @@ static void communicate(void *arg)
 {
     int64_t next = 0;
     for (;;) {
-        EventBits_t bits =
-            xEventGroupWaitBits(flags, BEAT | SAMPLES, pdTRUE, pdFALSE, pdMS_TO_TICKS(100));
+        EventBits_t bits = xEventGroupWaitBits(flags, BEAT, pdTRUE, pdFALSE, pdMS_TO_TICKS(100));
         if (!(xEventGroupGetBits(flags) & CONNECTED)) {
             continue;
         }
         if (bits & BEAT) {
             send("heartbeat", "heartbeat", journal_boot(), journal_seq(), now_ms(), "{}");
         }
-        if (bits & SAMPLES) {
-            samples();
-        }
         if (now_ms() >= next) {
             next = now_ms() + 1000;
             telemetry();
         }
         deliver();
-    }
-}
-
-void net_samples(void)
-{
-    if (flags) {
-        xEventGroupSetBits(flags, SAMPLES);
     }
 }
 
@@ -168,10 +164,16 @@ static const char *text(const cJSON *object, const char *key)
     return cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(object, key));
 }
 
-static uint32_t number(const cJSON *object, const char *key)
+bool json_u32(const cJSON *object, const char *key, uint32_t *out)
 {
     const cJSON *n = cJSON_GetObjectItemCaseSensitive(object, key);
-    return cJSON_IsNumber(n) && n->valuedouble >= 0 ? (uint32_t)n->valuedouble : 0;
+    double v = cJSON_IsNumber(n) ? n->valuedouble : -1;
+    /* Written so NaN fails too. */
+    if (!(v >= 0 && v <= UINT32_MAX && v == floor(v))) {
+        return false;
+    }
+    *out = (uint32_t)v;
+    return true;
 }
 
 static void receive(const char *name, int name_len, const char *data, int len)
@@ -196,16 +198,20 @@ static void receive(const char *name, int name_len, const char *data, int len)
     }
     cJSON *m = cJSON_ParseWithLength(data, len);
     const char *body = text(m, "body"), *type = text(m, "type"), *sender = text(m, "node_id");
-    if (m && body && type && sender && number(m, "version") == 1
-        && strcmp(sender, own ? "host" : node) == 0
-        && number(m, "checksum") == esp_rom_crc32_le(0, (const uint8_t *)body, strlen(body))) {
-        if (strcmp(kind, "ack") == 0) {
-            cJSON *b = cJSON_Parse(body);
-            journal_ack(number(b, "boot_id"), number(b, "seq"));
-            cJSON_Delete(b);
-        } else {
-            app_message(from, kind, number(m, "boot_id"), number(m, "seq"), type, body);
+    uint32_t version, checksum, boot, seq;
+    bool valid = m && body && type && sender && strcmp(sender, own ? "host" : node) == 0 &&
+                 json_u32(m, "version", &version) && version == 1 &&
+                 json_u32(m, "checksum", &checksum) &&
+                 checksum == esp_rom_crc32_le(0, (const uint8_t *)body, strlen(body)) &&
+                 json_u32(m, "boot_id", &boot) && json_u32(m, "seq", &seq);
+    if (valid && strcmp(kind, "ack") == 0) {
+        cJSON *b = cJSON_Parse(body);
+        if (json_u32(b, "boot_id", &boot) && json_u32(b, "seq", &seq)) {
+            journal_ack(boot, seq);
         }
+        cJSON_Delete(b);
+    } else if (valid && !app_message(from, kind, boot, seq, type, body)) {
+        journal_post(CRITICAL, "drop", "{\"kind\":\"%s\",\"seq\":%lu}", kind, (unsigned long)seq);
     }
     cJSON_Delete(m);
 }
@@ -252,7 +258,8 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
             started = true;
             esp_mqtt_client_start(client);
         }
-    } else if (base == WIFI_EVENT && (id == WIFI_EVENT_STA_START || id == WIFI_EVENT_STA_DISCONNECTED)) {
+    } else if (base == WIFI_EVENT &&
+               (id == WIFI_EVENT_STA_START || id == WIFI_EVENT_STA_DISCONNECTED)) {
         esp_wifi_connect();
     }
 }
@@ -262,7 +269,7 @@ void net_start(void)
     if (!broker_uri[0]) {
         return;
     }
-    flags = xEventGroupCreate();
+    MUST(flags = xEventGroupCreate());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
@@ -280,7 +287,7 @@ void net_start(void)
         .network.reconnect_timeout_ms = 2000,
         .buffer.size = 2048,
     };
-    client = esp_mqtt_client_init(&config);
+    MUST(client = esp_mqtt_client_init(&config));
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(client, MQTT_EVENT_ANY, on_mqtt, NULL));
 
     wifi_config_t sta = {.sta = {.ssid = "myssid", .password = "mypassword"}};
@@ -289,7 +296,8 @@ void net_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    TimerHandle_t timer = xTimerCreate("beat", pdMS_TO_TICKS(5000), pdTRUE, NULL, beat);
-    xTimerStart(timer, portMAX_DELAY);
-    xTaskCreate(communicate, "net", 8192, NULL, 3, NULL);
+    TimerHandle_t timer;
+    MUST(timer = xTimerCreate("beat", pdMS_TO_TICKS(5000), pdTRUE, NULL, beat));
+    MUST(xTimerStart(timer, portMAX_DELAY) == pdPASS);
+    MUST(xTaskCreate(communicate, "net", 8192, NULL, 3, NULL) == pdPASS);
 }

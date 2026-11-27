@@ -33,7 +33,18 @@ pub fn plugin(app: &mut App) {
         .add_systems(Startup, (model, lights, camera))
         .add_systems(
             Update,
-            (hinges, lamps, interior, glow, room, fan, rig, orbit),
+            (
+                hinges,
+                lamps,
+                interior,
+                glow,
+                room,
+                fan,
+                rig,
+                next_view.run_if(not(crate::stock::typing)),
+                orbit,
+            )
+                .chain(),
         )
         .add_observer(bind);
 }
@@ -180,6 +191,10 @@ fn model(mut commands: Commands, assets: Res<AssetServer>) {
     ));
 }
 
+/// The model is loaded and bound.
+#[derive(Resource)]
+pub struct SceneReady;
+
 /// Adds behavior to the model nodes by name.
 fn bind(
     ready: On<WorldInstanceReady>,
@@ -190,6 +205,7 @@ fn bind(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut spots: ResMut<Spots>,
 ) {
+    commands.insert_resource(SceneReady);
     for entity in children.iter_descendants(ready.entity) {
         if let Ok((name, handle)) = surfaces.get(entity) {
             if name.0 == "glass" {
@@ -762,8 +778,17 @@ fn fan(live: Res<Live>, time: Res<Time>, mut fans: Query<&mut Transform, With<Fa
     }
 }
 
+fn next_view(keys: Res<ButtonInput<KeyCode>>, mut cameras: Query<&mut Orbit>) {
+    if keys.just_pressed(KeyCode::KeyV) {
+        for mut o in &mut cameras {
+            o.view = (o.view + 1) % VIEWS.len();
+            o.moving = true;
+        }
+    }
+}
+
 fn orbit(
-    (buttons, keys): (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
+    buttons: Res<ButtonInput<MouseButton>>,
     (motion, scroll): (Res<AccumulatedMouseMotion>, Res<AccumulatedMouseScroll>),
     time: Res<Time>,
     live: Res<Live>,
@@ -783,10 +808,6 @@ fn orbit(
     for (mut o, mut transform) in &mut cameras {
         if let Some(view) = asked {
             o.view = view;
-            o.moving = true;
-        }
-        if keys.just_pressed(KeyCode::KeyV) {
-            o.view = (o.view + 1) % VIEWS.len();
             o.moving = true;
         }
         let view = &VIEWS[o.view];

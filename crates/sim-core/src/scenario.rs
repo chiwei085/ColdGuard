@@ -28,6 +28,19 @@ pub struct Caption {
     /// Camera view.
     #[serde(default)]
     pub view: String,
+    /// Act shown in the corner. Carries over to later captions.
+    #[serde(default)]
+    pub chapter: String,
+    /// Playback speed in a recorded video until the next caption.
+    #[serde(default = "normal_speed")]
+    pub video_speed: f64,
+    /// Leave this caption's span out of a recorded video.
+    #[serde(default)]
+    pub video_cut: bool,
+}
+
+fn normal_speed() -> f64 {
+    1.0
 }
 
 /// What the firmware must report within the time limit. Words are separated
@@ -104,9 +117,28 @@ pub struct Event {
 }
 
 impl Scenario {
+    /// The caption showing at a simulated time.
+    pub fn caption_at(&self, time_ms: f64) -> Option<&Caption> {
+        self.captions.iter().rfind(|c| c.at_ms as f64 <= time_ms)
+    }
+
     pub fn parse(text: &str) -> Result<Self, String> {
-        let s: Self = toml::from_str(text).map_err(|e| e.to_string())?;
+        let mut s: Self = toml::from_str(text).map_err(|e| e.to_string())?;
         s.validate()?;
+        let mut chapter = String::new();
+        for c in &mut s.captions {
+            if c.video_speed.is_nan() || c.video_speed < 1.0 {
+                return Err(format!(
+                    "caption at {} ms: video_speed must be at least 1",
+                    c.at_ms
+                ));
+            }
+            if c.chapter.is_empty() {
+                c.chapter.clone_from(&chapter);
+            } else {
+                chapter.clone_from(&c.chapter);
+            }
+        }
         Ok(s)
     }
 

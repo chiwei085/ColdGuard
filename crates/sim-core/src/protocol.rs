@@ -68,6 +68,12 @@ pub struct Report {
     pub person: String,
     /// Records not yet confirmed by the host.
     pub backlog: u64,
+    /// Carrier only. Time until the temperature counts as stable for departure.
+    pub stable_left_s: Option<u64>,
+    /// Carrier only. Departure conditions not met.
+    pub unmet: Vec<String>,
+    /// How long the door or lid has been open.
+    pub door_s: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

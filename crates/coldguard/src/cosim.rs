@@ -1,8 +1,8 @@
 //! Hand-coded esp_cosim.v1 subset. Claims the clock and the board's devices.
 
 use crate::devices::{
-    GAUGE, PIN_BUZZER, PIN_DOOR, PIN_MAINS, PIN_RELAY, PIN_RFID_RX, PIN_RFID_TX, PIN_SCL, PIN_SDA,
-    TMP117,
+    CLOCK, GAUGE, PIN_BUZZER, PIN_DOOR, PIN_MAINS, PIN_RELAY, PIN_RFID_RX, PIN_RFID_TX, PIN_SCL,
+    PIN_SDA, TMP117,
 };
 use sim_core::STEP_MS;
 use std::{
@@ -78,6 +78,7 @@ impl Cosim {
                 (CLAIM_GPIO, gpio),
                 (CLAIM_I2C, i2c(TMP117)),
                 (CLAIM_I2C, i2c(GAUGE)),
+                (CLAIM_I2C, i2c(CLOCK)),
                 (CLAIM_UART, uart),
                 (CLAIM_EN, vec![]),
             ],

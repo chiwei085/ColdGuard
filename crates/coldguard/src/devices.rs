@@ -4,6 +4,7 @@ use sim_core::Node;
 
 pub const TMP117: u64 = 0x48;
 pub const GAUGE: u64 = 0x36;
+pub const CLOCK: u64 = 0x68;
 
 const REG_TEMP: u8 = 0x00;
 const REG_CONFIG: u8 = 0x01;
@@ -113,6 +114,26 @@ impl Gauge {
     }
 }
 
+/// DS1672 binary counter on its own cell. Counts world seconds, so it keeps
+/// running while the unit is off or resetting.
+#[derive(Default)]
+pub struct Clock {
+    pointer: u8,
+}
+
+impl Clock {
+    pub fn transfer(&mut self, now_ms: u64, write: &[u8], read_len: usize) -> Vec<u8> {
+        if let Some(&register) = write.first() {
+            self.pointer = register;
+        }
+        let counter = ((now_ms / 1000) as u32).to_le_bytes();
+        let start = usize::from(self.pointer);
+        (start..start + read_len)
+            .map(|r| counter.get(r).copied().unwrap_or(0))
+            .collect()
+    }
+}
+
 fn take(value: u16, len: usize) -> Vec<u8> {
     value.to_be_bytes().into_iter().take(len).collect()
 }
@@ -174,6 +195,13 @@ mod tests {
         assert_eq!(t.transfer(None, 500, &[REG_TEMP], 2), None);
         let config = t.transfer(Some(5.0), 600, &[REG_CONFIG], 2).unwrap();
         assert_eq!(config, [0x02, 0x20]);
+    }
+
+    #[test]
+    fn clock_counts_world_seconds() {
+        let mut clock = Clock::default();
+        assert_eq!(clock.transfer(70_999, &[0], 4), [70, 0, 0, 0]);
+        assert_eq!(clock.transfer(300_000, &[1], 2), [1, 0]);
     }
 
     #[test]

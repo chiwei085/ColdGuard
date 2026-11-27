@@ -7,6 +7,8 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/uart.h"
+#include "esp_rom_sys.h"
+#include "esp_timer.h"
 
 #define PIN_SDA 8
 #define PIN_SCL 9
@@ -32,10 +34,18 @@
 #define BATTERY_LEVEL 0x00
 #define BATTERY_MV 0x02
 
+/* DS1672 on its own cell. A binary seconds counter, least significant byte first. */
+#define CLOCK_ADDR 0x68
+#define CLOCK_COUNTER 0x00
+/* A tick comes within a second. */
+#define CLOCK_WAIT_MS 1100
+
 #define I2C_TIMEOUT_MS 50
 
 static i2c_master_dev_handle_t thermometer, battery;
 static bool configured;
+/* Battery clock minus uptime. Zero while the clock cannot be read. */
+static int64_t clock_offset_ms;
 
 static i2c_master_dev_handle_t attach(i2c_master_bus_handle_t bus, uint16_t address)
 {
@@ -47,6 +57,41 @@ static i2c_master_dev_handle_t attach(i2c_master_bus_handle_t bus, uint16_t addr
     i2c_master_dev_handle_t device;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &config, &device));
     return device;
+}
+
+int64_t now_ms(void)
+{
+    return esp_timer_get_time() / 1000 + clock_offset_ms;
+}
+
+static bool read_clock(i2c_master_dev_handle_t clock, uint32_t *seconds)
+{
+    uint8_t reg = CLOCK_COUNTER, data[4];
+    if (i2c_master_transmit_receive(clock, &reg, 1, data, sizeof data, I2C_TIMEOUT_MS) != ESP_OK) {
+        return false;
+    }
+    *seconds = data[0] | data[1] << 8 | data[2] << 16 | (uint32_t)data[3] << 24;
+    return true;
+}
+
+/* The counter has no fraction, so time starts at its next tick. Runs once
+ * at boot, before any record is stamped. */
+static void set_clock(i2c_master_dev_handle_t clock)
+{
+    uint32_t first, now;
+    if (!read_clock(clock, &first)) {
+        return;
+    }
+    for (int i = 0; i < CLOCK_WAIT_MS; i++) {
+        esp_rom_delay_us(1000);
+        if (!read_clock(clock, &now)) {
+            return;
+        }
+        if (now != first) {
+            clock_offset_ms = (int64_t)now * 1000 - esp_timer_get_time() / 1000;
+            return;
+        }
+    }
 }
 
 void bus_init(void)
@@ -76,6 +121,7 @@ void bus_init(void)
     i2c_master_bus_handle_t bus;
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c, &bus));
     battery = attach(bus, BATTERY_ADDR);
+    set_clock(attach(bus, CLOCK_ADDR));
     if (self != INVENTORY) {
         thermometer = attach(bus, TMP117_ADDR);
     }
@@ -89,8 +135,8 @@ void bus_init(void)
     };
     ESP_ERROR_CHECK(uart_driver_install(RFID_UART, 256, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(RFID_UART, &uart));
-    ESP_ERROR_CHECK(uart_set_pin(RFID_UART, PIN_RFID_TX, PIN_RFID_RX, UART_PIN_NO_CHANGE,
-                                 UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(
+        uart_set_pin(RFID_UART, PIN_RFID_TX, PIN_RFID_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 }
 
 static bool read16(i2c_master_dev_handle_t device, uint8_t reg, uint16_t *value)
@@ -108,7 +154,8 @@ static bool read_temperature(float *celsius)
     uint16_t value;
     if (!configured) {
         uint8_t setup[] = {TMP117_CONFIG, TMP117_CONFIG_VALUE >> 8, TMP117_CONFIG_VALUE & 0xff};
-        configured = i2c_master_transmit(thermometer, setup, sizeof setup, I2C_TIMEOUT_MS) == ESP_OK;
+        configured =
+            i2c_master_transmit(thermometer, setup, sizeof setup, I2C_TIMEOUT_MS) == ESP_OK;
         return false;
     }
     if (!read16(thermometer, TMP117_CONFIG, &value)) {
@@ -128,8 +175,8 @@ void bus_sample(sample_t *out)
     uint16_t level = 0, mv = 0;
     memset(out, 0, sizeof *out);
     out->temp_valid = thermometer && read_temperature(&out->temp_c);
-    out->battery_valid =
-        read16(battery, BATTERY_LEVEL, &level) && read16(battery, BATTERY_MV, &mv) && level <= 10000;
+    out->battery_valid = read16(battery, BATTERY_LEVEL, &level) &&
+                         read16(battery, BATTERY_MV, &mv) && level <= 10000;
     out->battery = level / 10000.0f;
     out->battery_mv = mv;
     out->door_open = thermometer && gpio_get_level(PIN_DOOR);
@@ -166,8 +213,8 @@ bool bus_tag(char uid[UID_LEN + 1])
     } while (c != 0x02);
     char frame[11];
     uid[0] = '\0';
-    if (uart_read_bytes(RFID_UART, frame, sizeof frame, pdMS_TO_TICKS(200)) != sizeof frame
-        || frame[10] != 0x03) {
+    if (uart_read_bytes(RFID_UART, frame, sizeof frame, pdMS_TO_TICKS(200)) != sizeof frame ||
+        frame[10] != 0x03) {
         return false;
     }
     int sum = 0;

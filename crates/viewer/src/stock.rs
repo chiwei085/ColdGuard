@@ -2,15 +2,17 @@
 
 use crate::{
     Live, batches,
-    hud::{IDLE, MUTED, PANEL, Sent, WARNING, label},
+    hud::{IDLE, MUTED, PANEL, Sent, WARNING, label, minutes},
     link::Link,
     scene::{badge, scan},
 };
 use bevy::{
     camera::RenderTarget,
+    input_focus::{InputFocus, tab_navigation::TabIndex},
     prelude::*,
     render::render_resource::TextureFormat,
-    ui_widgets::{Activate, Button},
+    text::{EditableText, EditableTextFilter},
+    ui_widgets::{Activate, Button, TextInput},
 };
 use sim_core::{Action, Batch, Entry, Frame, NodeId, batch_tag};
 
@@ -23,7 +25,7 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<PanelOpen>()
         .add_systems(Startup, build)
         .init_resource::<Doors>()
-        .add_systems(Update, (toggle, refresh, close_doors));
+        .add_systems(Update, (toggle.run_if(not(typing)), refresh, close_doors));
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -61,6 +63,17 @@ struct ScreenRoot;
 
 #[derive(Component)]
 struct PanelRoot;
+
+/// The part of the panel rebuilt on each change. The basis field stays.
+#[derive(Component)]
+struct PanelContent;
+
+/// Basis typed for a verdict or a handover.
+#[derive(Component)]
+struct Basis;
+
+/// Commands whose note is the typed basis.
+const NEEDS_BASIS: [&str; 3] = ["release", "discard", "accept"];
 
 /// Image drawn by its own UI camera.
 pub fn target(
@@ -117,7 +130,52 @@ fn build(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             ..default()
         }),
         BackgroundColor(PANEL),
+        children![
+            (
+                PanelContent,
+                column(Node {
+                    row_gap: px(8),
+                    ..default()
+                })
+            ),
+            (
+                row(),
+                children![
+                    label("Basis", 13.0, MUTED),
+                    (
+                        Basis,
+                        TextInput,
+                        TabIndex(0),
+                        EditableText {
+                            // The firmware refuses a longer note.
+                            max_characters: Some(47),
+                            ..default()
+                        },
+                        // Typing stops what the firmware would refuse.
+                        EditableTextFilter::new(|c| {
+                            (c.is_ascii_graphic() || c == ' ') && c != '"' && c != '\\'
+                        }),
+                        TextFont {
+                            font_size: FontSize::Px(13.0),
+                            ..default()
+                        },
+                        Node {
+                            flex_grow: 1.0,
+                            padding: UiRect::axes(px(8), px(4)),
+                            border_radius: BorderRadius::all(px(6)),
+                            ..default()
+                        },
+                        BackgroundColor(IDLE),
+                    ),
+                ],
+            ),
+        ],
     ));
+}
+
+/// Run condition for keyboard shortcuts, so typing a basis triggers none.
+pub fn typing(focus: Res<InputFocus>, inputs: Query<(), With<TextInput>>) -> bool {
+    focus.get().is_some_and(|e| inputs.contains(e))
 }
 
 fn column(node: Node) -> Node {
@@ -144,6 +202,10 @@ struct Shown {
     person: String,
     transit: u64,
     receiver: bool,
+    carrier_online: bool,
+    stable_left_s: Option<u64>,
+    unmet: Vec<String>,
+    backlog: u64,
     event: Option<(String, bool)>,
     records: Vec<(String, bool)>,
 }
@@ -185,6 +247,10 @@ impl Shown {
             person: f.inventory.person.clone(),
             transit: f.carrier.transit,
             receiver: f.carrier.receiver,
+            carrier_online: f.carrier.online,
+            stable_left_s: f.carrier.stable_left_s,
+            unmet: f.carrier.unmet.clone(),
+            backlog: f.carrier.backlog,
             event: told.next(),
             records,
             open,
@@ -240,6 +306,29 @@ pub fn describe(e: &Entry) -> Option<(String, bool)> {
         "scan" => (format!("unreadable tag at {name}"), true),
         "peer" if b["online"] == 0 => (format!("{} lost contact", text("peer")), true),
         "peer" => (format!("{} connected", text("peer")), false),
+        "samples" => {
+            let t: Vec<f64> = b["centi_c"]
+                .as_array()?
+                .iter()
+                .filter_map(|v| Some(v.as_f64()? / 100.0))
+                .collect();
+            let (low, high) = t
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+            let range = if t.is_empty() {
+                String::new()
+            } else {
+                format!(", {low:.2} to {high:.2} C")
+            };
+            (
+                format!(
+                    "{name}: {} s from {} s before excursion{range}",
+                    t.len(),
+                    -b["from_s"].as_i64().unwrap_or(0)
+                ),
+                true,
+            )
+        }
         _ => return None,
     })
 }
@@ -249,7 +338,8 @@ fn refresh(
     live: Res<Live>,
     open: Res<PanelOpen>,
     screen: Single<Entity, With<ScreenRoot>>,
-    panel: Single<(Entity, &mut Node), With<PanelRoot>>,
+    mut panel: Single<&mut Node, With<PanelRoot>>,
+    content: Single<Entity, With<PanelContent>>,
     mut last: Local<Option<Shown>>,
 ) {
     if !live.is_changed() && !open.is_changed() && last.is_some() {
@@ -259,8 +349,7 @@ fn refresh(
     if last.as_ref() == Some(&shown) {
         return;
     }
-    let (panel, mut layout) = panel.into_inner();
-    layout.display = if shown.open != Panel::Closed {
+    panel.display = if shown.open != Panel::Closed {
         Display::Flex
     } else {
         Display::None
@@ -270,7 +359,7 @@ fn refresh(
         .despawn_children()
         .with_children(|p| draw_screen(p, &shown));
     commands
-        .entity(panel)
+        .entity(*content)
         .despawn_children()
         .with_children(|p| draw_panel(p, &shown));
     *last = Some(shown);
@@ -343,10 +432,10 @@ fn draw_panel(p: &mut ChildSpawnerCommands, s: &Shown) {
             p.spawn(label(&name, 15.0, Color::WHITE));
             p.spawn(label(text, 13.0, color));
             if batch.is_none() {
-                button(p, "Check in", operate("checkin", &name, ""));
+                button(p, "Check in", operate("checkin", &name));
             }
-            for (text, cmd, note) in batch.map_or(&[][..], choices) {
-                button(p, text, operate(cmd, &name, note));
+            for (text, cmd) in batch.map_or(&[][..], choices) {
+                button(p, text, operate(cmd, &name));
             }
         });
     }
@@ -375,9 +464,43 @@ fn draw_panel(p: &mut ChildSpawnerCommands, s: &Shown) {
                 button(p, text, vec![badge(node), command(node, cmd, "", note)]);
             }
         });
+        carrier_status(p, s);
     }
     for (text, bad) in &s.records {
         p.spawn(label(text, 12.0, if *bad { WARNING } else { MUTED }));
+    }
+}
+
+/// Departure conditions before leaving, upload progress after.
+fn carrier_status(p: &mut ChildSpawnerCommands, s: &Shown) {
+    if !s.carrier_online {
+        let text = format!("BOX-1 offline, last known {} records to upload", s.backlog);
+        p.spawn(label(&text, 12.0, WARNING));
+        return;
+    }
+    if s.transit != 0 {
+        let (text, color) = match s.backlog {
+            0 => ("All transport records on file".into(), GOOD),
+            n => (format!("Uploading transport records, {n} left"), WARNING),
+        };
+        p.spawn(label(&text, 12.0, color));
+        return;
+    }
+    let stable = match s.stable_left_s {
+        Some(0) => "Temperature stable 2-8 C".into(),
+        Some(left) => format!("Temperature stable 2-8 C, {} to go", minutes(left)),
+        None => "Temperature stable 2-8 C, unknown".into(),
+    };
+    for (key, text) in [
+        ("receiver", "Receiver confirmed".into()),
+        ("stable", stable),
+        ("battery", "Battery sufficient".into()),
+        ("safe_time", "Holds for packing, travel and margin".into()),
+        ("lid", "Lid closed".into()),
+    ] {
+        let met = !s.unmet.iter().any(|u| u == key);
+        let (mark, color) = if met { ("OK ", GOOD) } else { ("NO ", BAD) };
+        p.spawn(label(&format!("{mark} {text}"), 12.0, color));
     }
 }
 
@@ -400,32 +523,27 @@ fn close_button(p: &mut ChildSpawnerCommands) {
 }
 
 /// Offers only what may apply. The firmware decides.
-fn choices(b: &Batch) -> &'static [(&'static str, &'static str, &'static str)] {
+fn choices(b: &Batch) -> &'static [(&'static str, &'static str)] {
     match (b.status.as_str(), b.phase.as_str()) {
         ("dnu", "stored") if b.place == "fridge" => &[
-            ("Quarantine", "quarantine", ""),
-            ("Release", "release", "maker confirmed stable"),
-            ("Discard", "discard", "maker rejected"),
+            ("Quarantine", "quarantine"),
+            ("Release", "release"),
+            ("Discard", "discard"),
         ],
-        ("dnu", _) => &[
-            ("Release", "release", "maker confirmed stable"),
-            ("Discard", "discard", "maker rejected"),
-        ],
-        ("ok", "pending") => &[("Accept", "accept", "transport log checked")],
-        ("ok", "stored") if b.place == "fridge" => {
-            &[("Check out", "checkout", ""), ("Load", "load", "")]
-        }
-        ("ok", "out") => &[("Check in", "checkin", "")],
-        ("ok", "stored") => &[("Check out", "checkout", "")],
+        ("dnu", _) => &[("Release", "release"), ("Discard", "discard")],
+        ("ok", "pending") => &[("Accept", "accept")],
+        ("ok", "stored") if b.place == "fridge" => &[("Check out", "checkout"), ("Load", "load")],
+        ("ok", "out") => &[("Check in", "checkin")],
+        ("ok", "stored") => &[("Check out", "checkout")],
         _ => &[],
     }
 }
 
 /// The batch tag goes past the reader before the command.
-fn operate(cmd: &str, batch: &str, note: &str) -> Vec<Action> {
+fn operate(cmd: &str, batch: &str) -> Vec<Action> {
     let node = NodeId::Inventory;
     let tag = Action::scan(node, batch_tag(batch));
-    vec![tag, command(node, cmd, batch, note)]
+    vec![tag, command(node, cmd, batch, "")]
 }
 
 /// Units a command reaches into.
@@ -468,12 +586,20 @@ fn button(p: &mut ChildSpawnerCommands, text: &str, actions: Vec<Action>) {
               live: Res<Live>,
               link: Res<Link>,
               mut sent: ResMut<Sent>,
-              mut opened: ResMut<Doors>| {
+              mut opened: ResMut<Doors>,
+              mut basis: Single<&mut EditableText, With<Basis>>| {
             let Some(f) = &live.0 else { return };
             let now = f.world.time_ms;
             for action in &actions {
+                let mut action = action.clone();
+                if let Action::Operate { cmd, note, .. } = &mut action
+                    && NEEDS_BASIS.contains(&cmd.as_str())
+                {
+                    *note = basis.value().to_string().trim().into();
+                    basis.clear();
+                }
                 link.act(action.clone());
-                let Action::Operate { cmd, .. } = action else {
+                let Action::Operate { cmd, .. } = &action else {
                     continue;
                 };
                 sent.0 = Some(now);

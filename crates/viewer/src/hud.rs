@@ -34,7 +34,14 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                cards, clock, speed, buttons, keys, caption, outcome, tooltip,
+                cards,
+                clock,
+                speed,
+                buttons,
+                keys.run_if(not(crate::stock::typing)),
+                caption,
+                outcome,
+                tooltip,
             )
                 .chain(),
         );
@@ -54,8 +61,15 @@ pub struct Hint(pub Option<&'static str>);
 #[derive(Resource, Default)]
 pub struct Sent(pub Option<u64>);
 
+/// Hidden when the view cannot be operated.
+#[derive(Component)]
+pub struct Controls;
+
 #[derive(Component)]
 struct CaptionText;
+
+#[derive(Component)]
+struct ChapterText;
 
 #[derive(Component)]
 struct Outcome;
@@ -253,6 +267,27 @@ fn build(mut commands: Commands) {
                 }
             });
     }
+    commands
+        .spawn((
+            center(Node {
+                top: px(16),
+                ..default()
+            }),
+            bevy::picking::Pickable::IGNORE,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                ChapterText,
+                Node {
+                    padding: UiRect::axes(px(14), px(6)),
+                    border_radius: BorderRadius::all(px(8)),
+                    display: Display::None,
+                    ..default()
+                },
+                BackgroundColor(PANEL),
+                label("", 15.0, MUTED),
+            ));
+        });
     commands.spawn((
         Tooltip,
         GlobalZIndex(10),
@@ -290,10 +325,13 @@ fn build(mut commands: Commands) {
         })
     };
     commands
-        .spawn(bar(Node {
-            left: px(16),
-            ..default()
-        }))
+        .spawn((
+            Controls,
+            bar(Node {
+                left: px(16),
+                ..default()
+            }),
+        ))
         .with_children(|p| {
             for (op, text) in faults {
                 button(p, op, text);
@@ -322,6 +360,7 @@ fn build(mut commands: Commands) {
 fn button(parent: &mut ChildSpawnerCommands, op: Op, text: &str) {
     let mut entity = parent.spawn((
         op,
+        Controls,
         Button,
         Hovered::default(),
         Node {
@@ -421,10 +460,18 @@ fn reported(r: &Report, n: &sim_core::Node) -> Vec<String> {
     }
     let unknown = !n.mains && r.safe_s.is_none() && r.alarms.iter().any(|a| a == "mains_lost");
     let mut list: Vec<_> = r.alarms.iter().map(|a| a.replace('_', " ")).collect();
+    if r.door_s > 0 {
+        list.push(format!("open {} s", r.door_s));
+    }
     if !n.mains
         && let Some(s) = r.safe_s.filter(|_| !r.alarms.is_empty())
     {
-        list.push(format!("safe for {} min", s / 60));
+        list.push(format!("safe for {}", minutes(s)));
+    }
+    if r.transit == 0
+        && let Some(left) = r.stable_left_s.filter(|s| *s > 0)
+    {
+        list.push(format!("stable to depart in {}", minutes(left)));
     }
     if unknown {
         list.push("safe time unknown".into());
@@ -480,6 +527,10 @@ fn buttons(live: Res<Live>, mut query: Query<(&Op, &Hovered, &mut BackgroundColo
     }
 }
 
+pub fn minutes(s: u64) -> String {
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
 /// A write lays the text out again, so equal values are skipped.
 pub fn set_text(text: &mut Mut<Text>, value: String) {
     if text.0 != value {
@@ -501,10 +552,17 @@ fn show(text: &mut Mut<Text>, node: &mut Mut<Node>, value: Option<String>) {
     }
 }
 
-fn caption(live: Res<Live>, line: Single<(&mut Text, &mut Node), With<CaptionText>>) {
+fn caption(
+    live: Res<Live>,
+    line: Single<(&mut Text, &mut Node), (With<CaptionText>, Without<ChapterText>)>,
+    chapter: Single<(&mut Text, &mut Node), With<ChapterText>>,
+) {
     let (mut text, mut node) = line.into_inner();
     let caption = live.0.as_ref().and_then(|f| f.caption.as_ref());
     show(&mut text, &mut node, caption.map(|c| c.text.clone()));
+    let (mut text, mut node) = chapter.into_inner();
+    let act = caption.map(|c| c.chapter.clone()).filter(|c| !c.is_empty());
+    show(&mut text, &mut node, act);
 }
 
 /// Shown for this long.

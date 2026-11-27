@@ -42,6 +42,23 @@ struct Shared {
     counts: [(u64, u64); 3],
 }
 
+impl Shared {
+    /// Nodes stamp records with their battery clock.
+    fn show(&mut self, id: NodeId, e: Envelope) {
+        let time_ms = e.sim_time_ms;
+        let events = &mut self.fleet.events;
+        if events.len() == SHOWN_EVENTS {
+            events.remove(0);
+        }
+        events.push(Entry {
+            time_ms,
+            node: id,
+            kind: e.r#type,
+            body: e.body,
+        });
+    }
+}
+
 pub struct Hub {
     client: Client,
     shared: Arc<Mutex<Shared>>,
@@ -267,39 +284,34 @@ fn receive(
         }
         "event" => {
             // Confirm only after the record is durable.
-            let new = db
-                .prepare_cached("INSERT OR IGNORE INTO records VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
-                .and_then(|mut s| {
-                    s.execute(params![
-                        session,
-                        name,
-                        e.boot_id,
-                        e.seq,
-                        e.sim_time_ms as i64,
-                        e.r#type,
-                        e.body
-                    ])
-                })
-                .map_err(|e| e.to_string())?;
+            let new = store(db, session, name, &e)?;
             let ack = json!({"boot_id": e.boot_id, "seq": e.seq});
             publish(client, id, "ack", e.boot_id, e.seq, ack)?;
-            if new == 1 {
-                let mut s = shared.lock().unwrap();
-                let events = &mut s.fleet.events;
-                if events.len() == SHOWN_EVENTS {
-                    events.remove(0);
-                }
-                events.push(Entry {
-                    time_ms: now,
-                    node: id,
-                    kind: e.r#type,
-                    body: e.body,
-                });
+            if new {
+                shared.lock().unwrap().show(id, e);
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Returns whether the record is new.
+fn store(db: &Connection, session: u32, node: &str, e: &Envelope) -> Result<bool> {
+    db.prepare_cached("INSERT OR IGNORE INTO records VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
+        .and_then(|mut s| {
+            s.execute(params![
+                session,
+                node,
+                e.boot_id,
+                e.seq,
+                e.sim_time_ms as i64,
+                e.r#type,
+                e.body
+            ])
+        })
+        .map(|n| n == 1)
+        .map_err(|e| e.to_string())
 }
 
 fn telemetry(fleet: &mut Fleet, id: NodeId, boot: u32, body: &Value) {
@@ -321,6 +333,14 @@ fn telemetry(fleet: &mut Fleet, id: NodeId, boot: u32, body: &Value) {
     report.receiver = flag("receiver");
     report.person = text(&body["person"]);
     report.backlog = body["backlog"].as_u64().unwrap_or(0);
+    report.stable_left_s = body["stable_left_s"].as_u64();
+    report.door_s = body["door_s"].as_u64().unwrap_or(0);
+    report.unmet = body["unmet"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(text)
+        .collect();
     if let Some(list) = body["batches"].as_array() {
         fleet.batches = list
             .iter()

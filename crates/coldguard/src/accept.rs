@@ -497,6 +497,8 @@ fn stock(t: &Toolchain) -> Result {
     n.wait_status("VAX-02", "fridge", "stored", "dnu")?;
     n.expect(INVENTORY, "checkout", "VAX-01", "", "do not use")?;
     n.expect(INVENTORY, "release", "VAX-01", "", "basis required")?;
+    n.expect(INVENTORY, "release", "VAX-01", "say \"ok\"", "bad note")?;
+    n.expect(INVENTORY, "release", "VAX-01", &"x".repeat(48), "bad note")?;
     n.expect(INVENTORY, "release", "VAX-01", "maker letter 12", "ok")?;
 
     let boot = n.lab.fleet().inventory.boot_id;
@@ -629,6 +631,7 @@ fn network_loss(t: &Toolchain) -> Result {
     }
     n.expect(INVENTORY, "checkout", "VAX-01", "", "storage offline")?;
     // Local control keeps recording.
+    let cut = n.sim.world().time_ms;
     n.bias(FRIDGE, 4.0)?;
     n.run(5)?;
     n.bias(FRIDGE, 0.0)?;
@@ -636,12 +639,34 @@ fn network_loss(t: &Toolchain) -> Result {
     if !n.bodies(FRIDGE, "excursion").is_empty() {
         return Err("event crossed a cut network".into());
     }
+    let rejoin = n.sim.world().time_ms;
     n.act(Action::Network {
         node: FRIDGE,
         up: true,
     })?;
     let back = n.until("missed events", 30, |n| {
         n.bodies(FRIDGE, "excursion").len() == 2
+    })?;
+    // Records sent late keep the time they happened.
+    let shown: Vec<_> = n
+        .lab
+        .fleet()
+        .events
+        .iter()
+        .filter(|e| e.node == FRIDGE && e.kind == "excursion")
+        .map(|e| e.time_ms)
+        .collect();
+    if shown.iter().any(|t| !(cut..rejoin).contains(t)) {
+        return Err(format!(
+            "excursions shown at {shown:?}, outside {cut}..{rejoin}"
+        ));
+    }
+    n.until("samples before the excursion", 10, |n| {
+        n.bodies(FRIDGE, "samples")
+            .iter()
+            .filter_map(|b| b["centi_c"].as_array().map(Vec::len))
+            .sum::<usize>()
+            > 0
     })?;
     n.until("backlog confirmed", 20, |n| {
         n.lab.fleet().fridge.backlog == 0
@@ -676,8 +701,13 @@ fn unit_reset(t: &Toolchain) -> Result {
     n.bias(FRIDGE, 4.0)?;
     n.run(4)?;
     let boot = n.lab.fleet().fridge.boot_id;
-    n.lab.boards[0].reset()?;
-    n.run(5)?;
+    // The middle boot is never heard live, so only its own clock can date it.
+    let mut resets = vec![];
+    for _ in 0..2 {
+        resets.push(n.sim.world().time_ms);
+        n.lab.boards[0].reset()?;
+        n.run(5)?;
+    }
     if n.sim.world().fridge.relay_on != n.lab.boards[0].relay() {
         return Err("relay state lost".into());
     }
@@ -686,7 +716,7 @@ fn unit_reset(t: &Toolchain) -> Result {
         up: true,
     })?;
     n.until("reboot seen", 30, |n| {
-        n.lab.fleet().fridge.boot_id == boot + 1
+        n.lab.fleet().fridge.boot_id == boot + 2
     })?;
     n.until("records from before the reset", 20, |n| {
         !n.bodies(FRIDGE, "excursion").is_empty()
@@ -694,7 +724,20 @@ fn unit_reset(t: &Toolchain) -> Result {
     n.until("backlog confirmed", 20, |n| {
         n.lab.fleet().fridge.backlog == 0
     })?;
-    Ok("unconfirmed records survive a reset".into())
+    let boots: Vec<_> = n
+        .lab
+        .fleet()
+        .events
+        .iter()
+        .filter(|e| e.node == FRIDGE && e.kind == "boot")
+        .map(|e| e.time_ms)
+        .collect();
+    for at in &resets {
+        if !boots.iter().any(|b| (*at..at + 3000).contains(b)) {
+            return Err(format!("boots shown at {boots:?}, resets at {resets:?}"));
+        }
+    }
+    Ok("unconfirmed records survive resets and keep their times".into())
 }
 
 fn damaged_frame(t: &Toolchain) -> Result {
@@ -742,6 +785,15 @@ fn battery_empty(t: &Toolchain) -> Result {
     Ok("off without power, restarted with mains".into())
 }
 
+/// One record on the inventory log.
+fn scan_once(n: &mut Net) -> Result<()> {
+    n.act(Action::scan(INVENTORY, NURSE))?;
+    for _ in 0..60 {
+        n.step()?;
+    }
+    Ok(())
+}
+
 /// The host stops storing records until the node log is full.
 fn log_full(t: &Toolchain) -> Result {
     use std::sync::atomic::Ordering;
@@ -750,16 +802,28 @@ fn log_full(t: &Toolchain) -> Result {
     n.expect(INVENTORY, "checkin", "VAX-01", "", "ok")?;
     n.lab.hub.reject.store(true, Ordering::Relaxed);
     for _ in 0..4600 {
-        n.act(Action::scan(INVENTORY, NURSE))?;
-        for _ in 0..60 {
-            n.step()?;
-        }
+        scan_once(&mut n)?;
         if n.alarm(INVENTORY, "log_full") {
             break;
         }
     }
     n.until("log alarm", 5, |n| n.alarm(INVENTORY, "log_full"))?;
-    let held = n.lab.fleet().inventory.backlog;
+    let warned = n.lab.fleet().inventory.backlog;
+    // Full once the backlog stops growing.
+    let mut held = warned;
+    for _ in 0..100 {
+        for _ in 0..50 {
+            scan_once(&mut n)?;
+        }
+        let now = n.lab.fleet().inventory.backlog;
+        if now == held {
+            break;
+        }
+        held = now;
+    }
+    if warned + 500 > held {
+        return Err(format!("alarm at {warned} records, full at {held}"));
+    }
     if held < 4096 {
         return Err(format!("full at {held} records"));
     }
@@ -781,19 +845,30 @@ fn log_full(t: &Toolchain) -> Result {
     n.until("log alarm cleared", 5, |n| !n.alarm(INVENTORY, "log_full"))?;
     n.expect(INVENTORY, "checkout", "VAX-01", "", "ok")?;
     Ok(format!(
-        "refused with {held} unconfirmed records, all confirmed in {took} s"
+        "alarm at {warned}, refused with {held} unconfirmed records, all confirmed in {took} s"
     ))
 }
 
 fn replay(t: &Toolchain, name: &str) -> Result {
     let path = t.root.join(format!("scenarios/{name}.toml"));
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
-    let mut n = Net::load(t, Simulation::new(Scenario::parse(&text)?)?)?;
+    run_checked(t, Scenario::parse(&text)?, |_, _| Ok(()))
+}
+
+/// Run a scenario at 1x and fail at the first check past its deadline.
+/// `each` sees the state before every step.
+pub(crate) fn run_checked(
+    t: &Toolchain,
+    scenario: Scenario,
+    mut each: impl FnMut(&Simulation, &Lab) -> Result<()>,
+) -> Result {
+    let mut n = Net::load(t, Simulation::new(scenario)?)?;
     let mut open = n.sim.scenario().checks.clone();
     let count = open.len();
     while !n.sim.finished() {
         let begin = Instant::now();
         for _ in 0..100 {
+            each(&n.sim, &n.lab)?;
             n.step()?;
         }
         let (now, fleet) = (n.sim.world().time_ms, n.lab.fleet());
@@ -802,7 +877,8 @@ fn replay(t: &Toolchain, name: &str) -> Result {
             let recent: Vec<_> = fleet.events.iter().rev().take(4).collect();
             return Err(format!("{c:?} failed. Recent: {recent:?}"));
         }
-        sleep(Duration::from_millis(10).saturating_sub(begin.elapsed()));
+        // Network scenarios run at 1x.
+        sleep(Duration::from_millis(100).saturating_sub(begin.elapsed()));
     }
     Ok(format!("{count} checks hold"))
 }

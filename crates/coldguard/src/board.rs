@@ -2,7 +2,7 @@
 
 use crate::{
     cosim::{Cosim, Event, QUANTUM_NS},
-    devices::{self, GAUGE, Gauge, PIN_BUZZER, PIN_RELAY, TMP117, Tmp117, tag_frame},
+    devices::{self, CLOCK, Clock, GAUGE, Gauge, PIN_BUZZER, PIN_RELAY, TMP117, Tmp117, tag_frame},
     smoke::{Emulator, NET, free_port},
     toolchain::Toolchain,
 };
@@ -22,6 +22,7 @@ pub struct Board {
     cosim: Cosim,
     thermometer: Tmp117,
     gauge: Gauge,
+    clock: Clock,
     levels: [Option<bool>; 2],
     powered: bool,
     scans: u64,
@@ -74,6 +75,7 @@ impl Board {
             cosim,
             thermometer: Tmp117::default(),
             gauge: Gauge::default(),
+            clock: Clock::default(),
             levels: [None; 2],
             powered: true,
             scans: 0,
@@ -154,6 +156,7 @@ impl Board {
                             })
                         }
                         GAUGE => Some(self.gauge.transfer(node.battery_level, &write, read_len)),
+                        CLOCK => Some(self.clock.transfer(now_ms, &write, read_len)),
                         _ => None,
                     };
                     self.cosim

@@ -35,8 +35,7 @@ impl Simulation {
 
     /// Latest narration.
     pub fn caption(&self) -> Option<&Caption> {
-        let now = self.world.time_ms;
-        self.scenario.captions.iter().rfind(|c| c.at_ms <= now)
+        self.scenario.caption_at(self.world.time_ms as f64)
     }
 
     pub fn finished(&self) -> bool {

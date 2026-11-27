@@ -3,6 +3,7 @@
 #include "node.h"
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,6 +13,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
+/* Identifies the slot layout. Change it with slot_t, so old slots read as blank. */
 #define MAGIC 0xC01D
 #define SECTOR 4096
 /* Kept free for critical records. */
@@ -35,15 +37,24 @@ _Static_assert(sizeof(slot_t) == 256 || sizeof(slot_t) == 252, "slot layout");
 #define SLOT 256
 #define PER_SECTOR (SECTOR / SLOT)
 
+/* Set before any task starts. */
 static const esp_partition_t *part;
 static int slots;
+static uint32_t boot;
+
+/* Guarded by journal_mutex. */
 static int head;
 /* Oldest record that may still be unacknowledged, and the span to head. */
 static int tail, span;
-static int backlog;
-static bool full;
-static uint32_t boot, next_seq = 1;
-static SemaphoreHandle_t lock;
+static uint32_t next_seq = 1;
+
+/* Written under journal_mutex, read by any task. */
+static atomic_int backlog;
+static atomic_bool no_room, scarce, fault;
+/* Critical records dropped since the last "lost" record. Any task adds to it. */
+static atomic_uint lost;
+
+static SemaphoreHandle_t journal_mutex;
 static QueueHandle_t queue;
 
 static uint32_t checksum(const slot_t *s)
@@ -55,23 +66,47 @@ static uint32_t checksum(const slot_t *s)
 
 static bool load(int i, slot_t *s)
 {
-    return esp_partition_read(part, i * SLOT, s, sizeof *s) == ESP_OK && s->magic == MAGIC
-           && s->crc == checksum(s);
+    return esp_partition_read(part, i * SLOT, s, sizeof *s) == ESP_OK && s->magic == MAGIC &&
+           s->crc == checksum(s);
+}
+
+static void update_capacity(void)
+{
+    atomic_store(&no_room, slots - span <= PER_SECTOR);
+    atomic_store(&scarce, slots - span <= RESERVED + PER_SECTOR);
+}
+
+static bool store(kind_t kind, const char *type, const char *body);
+
+/* Records the loss once there is room, so a later success cannot hide it. */
+static void record_loss(void)
+{
+    unsigned n = atomic_load(&lost);
+    char body[24];
+    snprintf(body, sizeof body, "{\"n\":%u}", n);
+    if (n && store(CRITICAL, "lost", body)) {
+        atomic_fetch_sub(&lost, n);
+    }
 }
 
 static void recorder(void *arg)
 {
     record_t r;
     for (;;) {
-        xQueueReceive(queue, &r, portMAX_DELAY);
-        journal_add(r.kind, r.type, "%s", r.body);
+        if (xQueueReceive(queue, &r, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            journal_add(r.kind, r.type, "%s", r.body);
+        } else if (atomic_load(&lost)) {
+            xSemaphoreTake(journal_mutex, portMAX_DELAY);
+            record_loss();
+            xSemaphoreGive(journal_mutex);
+        }
     }
 }
 
 void journal_init(void)
 {
-    lock = xSemaphoreCreateMutex();
-    queue = xQueueCreate(32, sizeof(record_t));
+    MUST(journal_mutex = xSemaphoreCreateMutex());
+    MUST(queue = xQueueCreate(32, sizeof(record_t)));
     part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x41, "log");
     ESP_ERROR_CHECK(part ? ESP_OK : ESP_ERR_NOT_FOUND);
     slots = part->size / SLOT;
@@ -81,7 +116,8 @@ void journal_init(void)
     uint64_t high = 0, low = UINT64_MAX;
     for (int i = 0; i < slots; i++) {
         /* Blank slots are the common case. */
-        if (esp_partition_read(part, i * SLOT, &s, 16) != ESP_OK || s.magic != MAGIC || !load(i, &s)) {
+        if (esp_partition_read(part, i * SLOT, &s, 16) != ESP_OK || s.magic != MAGIC ||
+            !load(i, &s)) {
             continue;
         }
         uint64_t order = (uint64_t)s.boot << 32 | s.seq;
@@ -105,12 +141,12 @@ void journal_init(void)
     if (oldest >= 0 && span == 0) {
         span = slots;
     }
-    xTaskCreate(recorder, "record", 4096, NULL, 4, NULL);
+    update_capacity();
+    MUST(xTaskCreate(recorder, "record", 4096, NULL, 4, NULL) == pdPASS);
     journal_add(CRITICAL, "boot", "{}");
 }
 
-/* Opens the sector at head, if its records are all confirmed. */
-static bool open_sector(void)
+static bool sector_confirmed(void)
 {
     slot_t s;
     for (int i = head; i < head + PER_SECTOR; i++) {
@@ -118,19 +154,23 @@ static bool open_sector(void)
             return false;
         }
     }
-    return esp_partition_erase_range(part, head * SLOT, SECTOR) == ESP_OK;
+    return true;
 }
 
 static bool store(kind_t kind, const char *type, const char *body)
 {
-    int free = slots - span;
-    if (free <= PER_SECTOR || (kind == SUMMARY && free <= RESERVED + PER_SECTOR)) {
-        full = kind == CRITICAL || full;
+    if (atomic_load(&no_room) || (kind == SUMMARY && atomic_load(&scarce))) {
         return false;
     }
-    if (head % PER_SECTOR == 0 && !open_sector()) {
-        full = true;
-        return false;
+    if (head % PER_SECTOR == 0) {
+        if (!sector_confirmed()) {
+            atomic_store(&no_room, true);
+            return false;
+        }
+        if (esp_partition_erase_range(part, head * SLOT, SECTOR) != ESP_OK) {
+            atomic_store(&fault, true);
+            return false;
+        }
     }
     slot_t s;
     memset(&s, 0, sizeof s);
@@ -146,11 +186,12 @@ static bool store(kind_t kind, const char *type, const char *body)
     esp_err_t err = esp_partition_write(part, head * SLOT, &s, sizeof s);
     head = (head + 1) % slots;
     span++;
+    update_capacity();
+    atomic_store(&fault, err != ESP_OK);
     if (err != ESP_OK) {
         return false;
     }
-    backlog++;
-    full = false;
+    atomic_fetch_add(&backlog, 1);
     return true;
 }
 
@@ -159,11 +200,16 @@ bool journal_add(kind_t kind, const char *type, const char *fmt, ...)
     char body[BODY_MAX];
     va_list args;
     va_start(args, fmt);
-    vsnprintf(body, sizeof body, fmt, args);
+    /* A truncated body is not valid JSON. */
+    bool fits = vsnprintf(body, sizeof body, fmt, args) < (int)sizeof body;
     va_end(args);
-    xSemaphoreTake(lock, portMAX_DELAY);
-    bool ok = store(kind, type, body);
-    xSemaphoreGive(lock);
+    xSemaphoreTake(journal_mutex, portMAX_DELAY);
+    record_loss();
+    bool ok = fits && store(kind, type, body);
+    xSemaphoreGive(journal_mutex);
+    if (!ok && kind == CRITICAL) {
+        atomic_fetch_add(&lost, 1);
+    }
     return ok;
 }
 
@@ -173,10 +219,10 @@ void journal_post(kind_t kind, const char *type, const char *fmt, ...)
     strlcpy(r.type, type, sizeof r.type);
     va_list args;
     va_start(args, fmt);
-    vsnprintf(r.body, sizeof r.body, fmt, args);
+    bool fits = vsnprintf(r.body, sizeof r.body, fmt, args) < (int)sizeof r.body;
     va_end(args);
-    if (xQueueSend(queue, &r, 0) != pdTRUE) {
-        full = true;
+    if ((!fits || xQueueSend(queue, &r, 0) != pdTRUE) && kind == CRITICAL) {
+        atomic_fetch_add(&lost, 1);
     }
 }
 
@@ -184,7 +230,7 @@ int journal_pending(record_t *out, int max)
 {
     slot_t s;
     int found = 0;
-    xSemaphoreTake(lock, portMAX_DELAY);
+    xSemaphoreTake(journal_mutex, portMAX_DELAY);
     for (int i = 0; i < span && found < max; i++) {
         int at = (tail + i) % slots;
         if (!load(at, &s) || !s.unacked) {
@@ -204,14 +250,15 @@ int journal_pending(record_t *out, int max)
         memcpy(r->type, s.type, sizeof r->type);
         memcpy(r->body, s.body, sizeof r->body);
     }
-    xSemaphoreGive(lock);
+    update_capacity();
+    xSemaphoreGive(journal_mutex);
     return found;
 }
 
 void journal_ack(uint32_t ack_boot, uint32_t seq)
 {
     slot_t s;
-    xSemaphoreTake(lock, portMAX_DELAY);
+    xSemaphoreTake(journal_mutex, portMAX_DELAY);
     for (int i = 0; i < span; i++) {
         int at = (tail + i) % slots;
         if (!load(at, &s)) {
@@ -223,25 +270,29 @@ void journal_ack(uint32_t ack_boot, uint32_t seq)
         }
         if (s.boot == ack_boot && s.seq == seq) {
             uint8_t done = 0;
-            if (s.unacked
-                && esp_partition_write(part, at * SLOT + offsetof(slot_t, unacked), &done, 1) == ESP_OK) {
-                backlog--;
-                full = false;
+            if (s.unacked && esp_partition_write(part, at * SLOT + offsetof(slot_t, unacked), &done,
+                                                 1) == ESP_OK) {
+                atomic_fetch_sub(&backlog, 1);
             }
             break;
         }
     }
-    xSemaphoreGive(lock);
+    xSemaphoreGive(journal_mutex);
 }
 
 int journal_backlog(void)
 {
-    return backlog;
+    return atomic_load(&backlog);
 }
 
 bool journal_full(void)
 {
-    return full;
+    return atomic_load(&no_room) || atomic_load(&fault);
+}
+
+bool journal_low(void)
+{
+    return journal_full() || atomic_load(&scarce) || atomic_load(&lost);
 }
 
 uint32_t journal_boot(void)
@@ -251,8 +302,8 @@ uint32_t journal_boot(void)
 
 uint32_t journal_seq(void)
 {
-    xSemaphoreTake(lock, portMAX_DELAY);
+    xSemaphoreTake(journal_mutex, portMAX_DELAY);
     uint32_t seq = next_seq++;
-    xSemaphoreGive(lock);
+    xSemaphoreGive(journal_mutex);
     return seq;
 }

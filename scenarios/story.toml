@@ -1,6 +1,6 @@
 # Normal work, door alarm, outage, transport, lost contact and handover.
 # A warm day and a small fridge shorten the wait.
-duration_ms = 470_000
+duration_ms = 437_000
 snapshot_ms = 1000
 
 [config]
@@ -17,12 +17,13 @@ probe_tau_s = 60.0
 
 [[caption]]
 at_ms = 0
+chapter = "1 / 5  Check-in"
 text = "Morning delivery. Four batches wait on the counter."
 view = "clinic"
 
 [[caption]]
 at_ms = 10_000
-text = "The nurse shows a badge, then scans each batch into the fridge."
+text = "Badge first, then each batch is scanned in."
 view = "terminal"
 
 [[caption]]
@@ -37,12 +38,23 @@ view = "clinic"
 
 [[caption]]
 at_ms = 36_000
-text = "The door stays open."
+chapter = "2 / 5  Door alarm"
+text = "The door is left open."
+view = "fridge"
+
+[[caption]]
+at_ms = 56_000
+text = "Nobody notices. The fridge counts the seconds."
+view = "clinic"
+
+[[caption]]
+at_ms = 74_000
+text = "The alarm comes at 60 seconds."
 view = "fridge"
 
 [[caption]]
 at_ms = 93_000
-text = "After 60 seconds the fridge raises a door alarm."
+text = "Door alarm."
 view = "fridge"
 
 [[caption]]
@@ -52,12 +64,13 @@ view = "fridge"
 
 [[caption]]
 at_ms = 110_000
-text = "Mains fails. Cooling and lights stop. The battery keeps monitoring alive. Keep the door closed."
+chapter = "3 / 5  Outage"
+text = "Power out. Cooling stops. Monitoring runs on battery. Keep the door closed."
 view = "fridge"
 
 [[caption]]
 at_ms = 122_000
-text = "The safe time is not enough. The system advises transport."
+text = "Safe time runs short. Transport is advised."
 view = "fridge"
 
 [[caption]]
@@ -67,66 +80,98 @@ view = "carrier"
 
 [[caption]]
 at_ms = 134_000
-text = "Departure is refused. The box must hold 2 to 8 C for five minutes."
+text = "Departure refused. The box is not stable yet."
 view = "carrier"
 
 [[caption]]
 at_ms = 150_000
-text = "Meanwhile the batches are scanned into the box one by one."
+text = "Meanwhile each batch is scanned into the box."
 view = "clinic"
 
 [[caption]]
 at_ms = 170_000
-text = "Waiting for the box to prove itself stable."
+text = "The box must hold 2 to 8 C for five minutes before it leaves."
 view = "carrier"
 
 [[caption]]
-at_ms = 319_000
+at_ms = 200_000
+text = "The empty fridge warms without cooling. The batches left in time."
+view = "fridge"
+
+[[caption]]
+at_ms = 225_000
+text = "The box holds steady. Its countdown runs."
+view = "carrier"
+
+[[caption]]
+at_ms = 245_000
+text = "Still no mains. The monitor keeps watch on battery."
+view = "fridge"
+
+[[caption]]
+at_ms = 262_000
+text = "Less than a minute to go."
+view = "carrier"
+
+[[caption]]
+at_ms = 280_000
+text = "The fridge alarms stay on until power returns."
+view = "fridge"
+
+[[caption]]
+at_ms = 292_000
+text = "Almost there."
+view = "carrier"
+
+[[caption]]
+at_ms = 304_000
+chapter = "4 / 5  Transport"
 text = "Every condition holds. Departure is accepted."
 view = "carrier"
 
 [[caption]]
-at_ms = 324_000
+at_ms = 309_000
 text = "The box leaves with its three batches."
 view = "box"
 
 [[caption]]
-at_ms = 341_000
+at_ms = 316_000
 text = "On the way the box loses contact. It keeps recording."
 view = "box"
 
 [[caption]]
-at_ms = 368_000
-text = "At the clinic nobody can vouch for the batches. Use is refused."
+at_ms = 343_000
+text = "No contact, no proof. Use is refused."
 view = "terminal"
 
 [[caption]]
-at_ms = 376_000
+at_ms = 361_000
+chapter = "5 / 5  Handover"
 text = "The box reaches Clinic B."
 view = "receiver"
 
 [[caption]]
-at_ms = 390_000
+at_ms = 370_000
 text = "Contact is back. Missed records follow in order."
 view = "receiver"
 
 [[caption]]
-at_ms = 408_000
+at_ms = 388_000
 text = "The receiver signs for the box."
 view = "receiver"
 
 [[caption]]
-at_ms = 419_000
+at_ms = 399_000
 text = "Use stays blocked until each batch is accepted."
 view = "receiver"
 
 [[caption]]
-at_ms = 427_000
+at_ms = 407_000
 text = "The log is complete. Each batch is accepted."
 view = "receiver"
 
 [[caption]]
-at_ms = 445_000
+at_ms = 425_000
 text = "All three batches arrived safe and fully recorded."
 view = "receiver"
 
@@ -320,94 +365,94 @@ node = "carrier"
 open = false
 
 [[event]]
-at_ms = 318_000
+at_ms = 303_000
 action = "scan"
 node = "carrier"
 uid = "04A1B2C3"
 
 [[event]]
-at_ms = 320_000
+at_ms = 305_000
 action = "operate"
 node = "carrier"
 cmd = "depart"
 
 [[event]]
-at_ms = 340_000
+at_ms = 315_000
 action = "network"
 node = "carrier"
 up = false
 
 [[event]]
-at_ms = 368_000
+at_ms = 343_000
 action = "scan"
 node = "inventory"
 uid = "04A1B2C3"
 
 [[event]]
-at_ms = 370_000
+at_ms = 345_000
 action = "scan"
 node = "inventory"
 uid = "B1000001"
 
 [[event]]
-at_ms = 370_000
+at_ms = 345_000
 action = "operate"
 node = "inventory"
 cmd = "checkout"
 batch = "VAX-01"
 
 [[event]]
-at_ms = 390_000
+at_ms = 370_000
 action = "network"
 node = "carrier"
 up = true
 
 [[event]]
-at_ms = 408_000
+at_ms = 388_000
 action = "scan"
 node = "carrier"
 uid = "04D4E5F6"
 
 [[event]]
-at_ms = 410_000
+at_ms = 390_000
 action = "operate"
 node = "carrier"
 cmd = "arrive"
 note = "handed over"
 
 [[event]]
-at_ms = 418_000
+at_ms = 398_000
 action = "scan"
 node = "inventory"
 uid = "04D4E5F6"
 
 [[event]]
-at_ms = 420_000
+at_ms = 400_000
 action = "scan"
 node = "inventory"
 uid = "B1000001"
 
 [[event]]
-at_ms = 420_000
+at_ms = 400_000
 action = "operate"
 node = "inventory"
 cmd = "checkout"
 batch = "VAX-01"
 
 [[event]]
-at_ms = 425_000
+at_ms = 405_000
 action = "door"
 node = "carrier"
 open = true
 
 [[event]]
-at_ms = 427_000
+at_ms = 407_000
 action = "scan"
 node = "inventory"
 uid = "B1000001"
 
 [[event]]
-at_ms = 427_000
+at_ms = 407_000
 action = "operate"
 node = "inventory"
 cmd = "accept"
@@ -415,13 +460,13 @@ batch = "VAX-01"
 note = "transport log checked"
 
 [[event]]
-at_ms = 431_000
+at_ms = 411_000
 action = "scan"
 node = "inventory"
 uid = "B1000002"
 
 [[event]]
-at_ms = 431_000
+at_ms = 411_000
 action = "operate"
 node = "inventory"
 cmd = "accept"
@@ -429,13 +474,13 @@ batch = "VAX-02"
 note = "transport log checked"
 
 [[event]]
-at_ms = 435_000
+at_ms = 415_000
 action = "scan"
 node = "inventory"
 uid = "B1000003"
 
 [[event]]
-at_ms = 435_000
+at_ms = 415_000
 action = "operate"
 node = "inventory"
 cmd = "accept"
@@ -443,7 +488,7 @@ batch = "VAX-03"
 note = "transport log checked"
 
 [[event]]
-at_ms = 442_000
+at_ms = 422_000
 action = "door"
 node = "carrier"
 open = false
@@ -515,73 +560,73 @@ done = "load VAX-03"
 batch = "VAX-03 carrier stored ok"
 
 [[check]]
-at_ms = 320_500
+at_ms = 305_500
 done = "depart"
 transit = 1
 
 [[check]]
-at_ms = 321_000
+at_ms = 306_000
 batch = "VAX-01 carrier transit ok"
 
 [[check]]
-at_ms = 321_000
+at_ms = 306_000
 batch = "VAX-02 carrier transit ok"
 
 [[check]]
-at_ms = 321_000
+at_ms = 306_000
 batch = "VAX-03 carrier transit ok"
 
 [[check]]
-at_ms = 352_000
+at_ms = 327_000
 within_ms = 12000
 offline = "carrier"
 
 [[check]]
-at_ms = 370_500
+at_ms = 345_500
 refused = "checkout VAX-01 storage offline"
 
 [[check]]
-at_ms = 384_000
+at_ms = 364_000
 offline = "carrier"
 
 [[check]]
-at_ms = 392_000
+at_ms = 372_000
 within_ms = 13000
 online = "carrier"
 transit = 1
 
 [[check]]
-at_ms = 410_500
+at_ms = 390_500
 done = "arrive"
 transit = 2
 
 [[check]]
-at_ms = 411_000
+at_ms = 391_000
 batch = "VAX-01 carrier pending ok"
 
 [[check]]
-at_ms = 411_000
+at_ms = 391_000
 batch = "VAX-02 carrier pending ok"
 
 [[check]]
-at_ms = 411_000
+at_ms = 391_000
 batch = "VAX-03 carrier pending ok"
 
 [[check]]
-at_ms = 420_500
+at_ms = 400_500
 refused = "checkout VAX-01 pending"
 
 [[check]]
-at_ms = 427_500
+at_ms = 407_500
 done = "accept VAX-01"
 batch = "VAX-01 receiver stored ok"
 
 [[check]]
-at_ms = 431_500
+at_ms = 411_500
 done = "accept VAX-02"
 batch = "VAX-02 receiver stored ok"
 
 [[check]]
-at_ms = 435_500
+at_ms = 415_500
 done = "accept VAX-03"
 batch = "VAX-03 receiver stored ok"

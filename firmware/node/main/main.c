@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "esp_partition.h"
-#include "esp_timer.h"
 #include "nvs_flash.h"
 
 const char *const node_names[NODES] = {"fridge", "carrier", "inventory"};
@@ -18,11 +17,6 @@ node_t node_find(const char *name)
         n++;
     }
     return n;
-}
-
-int64_t now_ms(void)
-{
-    return esp_timer_get_time() / 1000;
 }
 
 /* The cfg partition holds "name port" as text. */
@@ -61,8 +55,9 @@ void app_main(void)
         puts("COLDGUARD_NO_CONFIG");
         return;
     }
-    journal_init();
+    /* The clock is set before the first record is stamped. */
     bus_init();
+    journal_init();
     control_start();
     app_start();
     net_start();
