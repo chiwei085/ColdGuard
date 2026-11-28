@@ -3,17 +3,17 @@
 //! so camera, captions and encoding can change without running it again.
 
 use crate::{lab::Lab, toolchain::Toolchain};
-use sim_core::{Frame, Simulation};
+use sim_core::{Frame, Simulation, VIDEO_FPS, VIDEO_SIZE};
 use std::{
     error::Error,
     fs::{self, File},
-    io::{BufWriter, Write},
+    io::{self, BufWriter, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 /// Matches the video frame rate so 1x sections never repeat a state.
-const SAMPLE_MS: f64 = 1000.0 / 60.0;
+const SAMPLE_MS: f64 = 1000.0 / VIDEO_FPS as f64;
 
 /// Render each scenario, then join them in order.
 pub fn run(
@@ -38,14 +38,8 @@ pub fn run(
             .into());
         }
         let part = dir.join(format!("{name}.mp4"));
-        // A no-op build after the first part.
-        let status = crate::viewer(t)?
-            .arg("--render")
-            .args([&timeline, &std::path::absolute(scenario)?, &part])
-            .status()?;
-        if !status.success() {
-            return Err(format!("render {}: {status}", scenario.display()).into());
-        }
+        render(t, &timeline, scenario, &part)
+            .map_err(|e| format!("render {}: {e}", scenario.display()))?;
         parts.push(part);
     }
     if let [only] = &parts[..] {
@@ -79,6 +73,76 @@ pub fn run(
         return Err(format!("join {status}").into());
     }
     fs::rename(joined, out)?;
+    Ok(())
+}
+
+/// Encodes the raw frames of the viewer to H.264, then checks the finished file.
+fn render(
+    t: &Toolchain,
+    timeline: &Path,
+    scenario: &Path,
+    out: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let part = out.with_extension("part.mp4");
+    let mut ffmpeg = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+        ])
+        .args(["-s", &format!("{}x{}", VIDEO_SIZE.0, VIDEO_SIZE.1)])
+        .args(["-framerate", &VIDEO_FPS.to_string(), "-i", "-"])
+        .args([
+            "-vf",
+            "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
+        ])
+        .args(["-c:v", "libx264", "-preset", "slow", "-crf", "17"])
+        .args(["-colorspace", "bt709", "-color_primaries", "bt709"])
+        .args(["-color_trc", "bt709", "-color_range", "tv"])
+        .args(["-movflags", "+faststart"])
+        .arg(&part)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("ffmpeg: {e}"))?;
+    // A no-op build after the first part.
+    let mut viewer = crate::viewer(t)?;
+    let (timeline, scenario) = (viewer.path(timeline)?, viewer.path(scenario)?);
+    let mut viewer = viewer
+        .command
+        .arg("--render")
+        .args([timeline, scenario])
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut frames = viewer.stdout.take().ok_or("viewer output closed")?;
+    let mut encoder = ffmpeg.stdin.take().ok_or("ffmpeg input closed")?;
+    let copied = io::copy(&mut frames, &mut encoder);
+    drop(encoder);
+    let (viewer, ffmpeg) = (viewer.wait()?, ffmpeg.wait()?);
+    if !viewer.success() {
+        return Err(format!("viewer {viewer}").into());
+    }
+    if !ffmpeg.success() {
+        return Err(format!("ffmpeg {ffmpeg}").into());
+    }
+    let bytes = copied?;
+    let frame = u64::from(VIDEO_SIZE.0 * VIDEO_SIZE.1 * 4);
+    if bytes == 0 || bytes % frame != 0 {
+        return Err(format!("viewer wrote {bytes} bytes, not whole frames").into());
+    }
+    let probe = Command::new("ffprobe")
+        .args(["-v", "error", "-count_packets", "-select_streams", "v:0"])
+        .args(["-show_entries", "stream=nb_read_packets", "-of", "csv=p=0"])
+        .arg(&part)
+        .output()?;
+    let decoded = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    if decoded != (bytes / frame).to_string() {
+        return Err(format!("wrote {} frames, decoded {decoded}", bytes / frame).into());
+    }
+    fs::rename(&part, out)?;
     Ok(())
 }
 

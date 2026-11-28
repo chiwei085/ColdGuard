@@ -9,7 +9,7 @@
 
 | 項目 | 選擇 |
 |---|---|
-| 開發與執行環境 | Linux x86_64：Ubuntu 22.04、24.04、26.04，Debian 12、13（CI 逐一驗證）；WSL 以 dozen 使用 GPU |
+| 開發與執行環境 | Linux x86_64：Ubuntu 22.04、24.04、26.04，Debian 12、13（CI 逐一驗證）；WSL2 上 viewer 以 Windows 程式執行並使用 GPU |
 | 韌體 | ESP-IDF、C、FreeRTOS |
 | 目標晶片 | ESP32-S3（效能不足時改用 ESP32-C3） |
 | 晶片模擬 | [esp-emu](https://github.com/espressif/esp-emulator) 1.2.0 |
@@ -34,7 +34,7 @@ git worktree add ../coldguard-ci   # 容器以 root 寫入 .tools 與 target，�
 docker run --rm -v "$PWD/../coldguard-ci:/work" -w /work debian:12 scripts/ci
 ```
 
-支援的發行版列於 `toolchain.toml` 的 `host.os`，CI 依此清單建立矩陣。WSL 上 `setup` 會另外建置 Mesa 的 dozen（Vulkan on D3D12），讓 viewer 與 `video` 使用 GPU 而非 llvmpipe。
+支援的發行版列於 `toolchain.toml` 的 `host.os`，CI 依此清單建立矩陣。WSL2 沒有可用的 Linux GPU 驅動，因此 `demo` 與 `video` 會把 viewer 交叉編譯成 Windows 程式（需 `gcc-mingw-w64-x86-64`，doctor 會列出），透過 interop 啟動並使用 Windows 的 GPU 驅動。影片編碼仍在 Linux 端進行。WSL1 或關閉 interop 時改用 Linux viewer，以 CPU 渲染。
 
 使用 mise 的人也直接執行 `cargo run`：專案的 `mise.toml` 會讓 mise 採用 `rust-toolchain.toml` 的版本。
 

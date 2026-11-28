@@ -28,28 +28,10 @@ url = "https://github.com/espressif/esp-emulator/releases/download/v1.2.0/esp-em
 archive_sha256 = "560236344fd69dc8d74bc862c79aea01f7a69ac626ae3f54b1b0946bbce078c1"
 binary_sha256 = "fe6b910f921772eed06969b57db02903c5f404a2f2a11dee116a857d4cdc3a2f"
 
-[dozen]
-# Mesa Vulkan driver on D3D12. WSL has no other Vulkan driver for the GPU,
-# so the viewer renders on the CPU without it. Built only when /dev/dxg exists.
-version = "25.2.8"
-url = "https://archive.mesa3d.org/mesa-25.2.8.tar.xz"
-archive_sha256 = "097842f3e49d996868b38688db87b006f7d4541e93ce86d2f341d8b3e7be7c93"
-# Build tools run through uv.
-python = ["meson==1.8.1", "mako==1.4.3", "pyyaml==6.0.4", "packaging==26.4"]
-# Required only on WSL.
-apt = [
-    "libx11-xcb-dev",
-    "libxcb-dri3-dev",
-    "libxcb-keysyms1-dev",
-    "libxcb-present-dev",
-    "libxcb-randr0-dev",
-    "libxcb-shm0-dev",
-    "libxcb-sync-dev",
-    "libxcb-xfixes0-dev",
-    "libxrandr-dev",
-    "libxshmfence-dev",
-    "pkg-config",
-]
+[wsl]
+# Under WSL the viewer is a Windows program so it renders with the Windows GPU
+# driver. These packages cross-compile it.
+apt = ["gcc-mingw-w64-x86-64"]
 
 [mqtt]
 port = 1884

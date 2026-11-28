@@ -32,7 +32,9 @@ fn main() -> AppExit {
     app.add_plugins((
         DefaultPlugins
             .set(AssetPlugin {
-                file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets").into(),
+                // The WSL launcher runs a Windows build that cannot see this path.
+                file_path: std::env::var("COLDGUARD_ASSETS")
+                    .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/assets").into()),
                 ..default()
             })
             .set(WindowPlugin {
