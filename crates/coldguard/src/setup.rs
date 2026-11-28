@@ -1,6 +1,6 @@
 //! Idempotent installation into .tools.
 
-use crate::toolchain::{Toolchain, find_in, user_path};
+use crate::toolchain::{Toolchain, WINDOWS_TARGET, find_in, user_path, windows_viewer};
 use std::{error::Error, fs, path::Path, process::Command};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -20,6 +20,9 @@ pub fn run(t: &Toolchain) -> Result {
     step("ESP-IDF toolchain", idf_tools(t))?;
     step("esp-emu", esp_emu(t))?;
     step("Cargo dependencies", cargo(t))?;
+    if windows_viewer() {
+        step("Windows viewer target", windows_target(t))?;
+    }
     step("Smoke firmware", smoke(t))?;
     step("Node firmware", node(t))
 }
@@ -156,6 +159,16 @@ fn esp_emu(t: &Toolchain) -> Result {
     fs::rename(tmp.join("esp-emu"), &bin)?;
     fs::remove_dir_all(&tmp)?;
     Ok(())
+}
+
+/// rustup reads the pinned toolchain from the project root.
+fn windows_target(t: &Toolchain) -> Result {
+    let rustup = t.cargo_bin("rustup").ok_or("rustup not found")?;
+    check(
+        t.plain(rustup)
+            .args(["target", "add", WINDOWS_TARGET])
+            .current_dir(&t.root),
+    )
 }
 
 fn cargo(t: &Toolchain) -> Result {

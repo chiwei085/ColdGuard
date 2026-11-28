@@ -3,7 +3,8 @@
 use crate::{
     smoke,
     toolchain::{
-        Toolchain, check_venv, find_in, idf_tools, user_path, windows_viewer, wsl, wsl_interop,
+        Toolchain, WINDOWS_TARGET, check_venv, find_in, idf_tools, user_path, windows_viewer, wsl,
+        wsl_interop,
     },
 };
 use serde::Serialize;
@@ -50,6 +51,7 @@ pub fn run(t: &Toolchain) -> Vec<Check> {
     d.python();
     d.esp_idf();
     d.esp_emu();
+    d.windows_target();
     d.layer = "Isolation";
     d.isolation();
     d.layer = "Runtime";
@@ -415,6 +417,30 @@ impl Doctor<'_> {
             ok_or(good, Status::Fail),
             got.unwrap_or_else(|e| e),
             fix,
+        );
+    }
+
+    fn windows_target(&mut self) {
+        if !windows_viewer() {
+            return;
+        }
+        let installed = self
+            .t
+            .cargo_bin("rustup")
+            .ok_or("rustup not found".to_string())
+            .and_then(|p| self.t.output(p, &["target", "list", "--installed"]));
+        let good = installed
+            .as_ref()
+            .is_ok_and(|s| s.lines().any(|l| l.trim() == WINDOWS_TARGET));
+        self.add(
+            "Windows viewer target",
+            ok_or(good, Status::Fail),
+            match installed {
+                Ok(_) if good => format!("{WINDOWS_TARGET} installed"),
+                Ok(_) => format!("{WINDOWS_TARGET} missing"),
+                Err(e) => e,
+            },
+            setup_fix(),
         );
     }
 

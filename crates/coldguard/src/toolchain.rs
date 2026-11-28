@@ -205,6 +205,9 @@ pub fn wsl_interop() -> bool {
         .is_ok_and(|s| s.starts_with("enabled"))
 }
 
+/// Rust target of the viewer under WSL2. setup adds it only there.
+pub const WINDOWS_TARGET: &str = "x86_64-pc-windows-gnu";
+
 /// Under WSL2 the viewer runs as a Windows program to use the Windows GPU driver.
 pub fn windows_viewer() -> bool {
     wsl() == Some(2) && wsl_interop()
