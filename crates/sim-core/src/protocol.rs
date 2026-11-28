@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 /// Loopback port for viewers.
 pub const LIVE_PORT: u16 = 7878;
 
+/// Raw RGBA video frames the viewer writes to stdout when rendering.
+pub const VIDEO_SIZE: (u32, u32) = (1920, 1080);
+pub const VIDEO_FPS: u32 = 60;
+
 /// Viewer input, one JSON object per line.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "control", rename_all = "snake_case")]

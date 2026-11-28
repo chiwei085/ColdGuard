@@ -2,7 +2,9 @@
 
 use crate::{
     smoke,
-    toolchain::{Toolchain, check_venv, find_in, idf_tools, user_path, wsl_gpu},
+    toolchain::{
+        Toolchain, check_venv, find_in, idf_tools, user_path, windows_viewer, wsl, wsl_interop,
+    },
 };
 use serde::Serialize;
 use std::{
@@ -48,7 +50,6 @@ pub fn run(t: &Toolchain) -> Vec<Check> {
     d.python();
     d.esp_idf();
     d.esp_emu();
-    d.dozen();
     d.layer = "Isolation";
     d.isolation();
     d.layer = "Runtime";
@@ -134,6 +135,19 @@ impl Doctor<'_> {
             Some(format!("Use a host with {} architecture", h.arch)),
         );
 
+        if let Some(version) = wsl() {
+            let interop = wsl_interop();
+            self.add(
+                "WSL",
+                ok_or(version == 2 && interop, Status::Warn),
+                format!(
+                    "WSL{version}, interop {}",
+                    if interop { "enabled" } else { "disabled" }
+                ),
+                Some("The viewer uses the GPU only on WSL2 with interop. Run wsl --set-version <distro> 2 in Windows, and set [interop] enabled=true in /etc/wsl.conf".into()),
+            );
+        }
+
         let want = h.recommended_memory_gib;
         let kib = fs::read_to_string("/proc/meminfo").ok().and_then(|s| {
             s.lines()
@@ -184,9 +198,9 @@ impl Doctor<'_> {
 
     fn apt(&mut self) {
         let mut want = self.t.m.apt.clone();
-        if wsl_gpu() {
-            let dozen = &self.t.m.dozen.apt;
-            want.extend(dozen.iter().map(|p| (p.clone(), String::new())));
+        if windows_viewer() {
+            let windows = &self.t.m.wsl.apt;
+            want.extend(windows.iter().map(|p| (p.clone(), String::new())));
         }
         let mut args = vec!["-W", "-f", "${Package}\t${db:Status-Status}\t${Version}\n"];
         args.extend(want.keys().map(String::as_str));
@@ -401,27 +415,6 @@ impl Doctor<'_> {
             ok_or(good, Status::Fail),
             got.unwrap_or_else(|e| e),
             fix,
-        );
-    }
-
-    fn dozen(&mut self) {
-        if !wsl_gpu() {
-            return;
-        }
-        let icd = self.t.dozen_icd();
-        let good = icd.is_file();
-        self.add(
-            "dozen",
-            ok_or(good, Status::Warn),
-            if good {
-                format!("Mesa {} Vulkan on D3D12", self.t.m.dozen.version)
-            } else {
-                format!(
-                    "{} does not exist. The viewer renders on the CPU",
-                    icd.display()
-                )
-            },
-            setup_fix(),
         );
     }
 

@@ -109,7 +109,7 @@ fn demo(
     path: &Path,
     headless: bool,
     firmware: bool,
-    viewer_args: &[OsString],
+    shots: Option<(PathBuf, Vec<u64>)>,
     speed: f64,
 ) -> Result<(), Box<dyn Error>> {
     let scenario = load_scenario(path)?;
@@ -121,7 +121,13 @@ fn demo(
         return live::serve(scenario, units, speed, || false);
     }
     // Build first so the server never waits for the compiler.
-    let mut viewer = viewer(t)?.args(viewer_args).spawn()?;
+    let mut viewer = viewer(t)?;
+    if let Some((path, at)) = shots {
+        let path = viewer.path(&path)?;
+        viewer.command.arg("--screenshot").arg(path);
+        viewer.command.args(at.iter().map(u64::to_string));
+    }
+    let mut viewer = viewer.command.spawn()?;
     let result = live::serve(scenario, units, speed, || {
         !matches!(viewer.try_wait(), Ok(None))
     });
@@ -135,24 +141,62 @@ fn demo(
         .ok_or_else(|| format!("viewer {status}").into())
 }
 
-/// Build the viewer and return a command that runs it on the GPU.
-fn viewer(t: &Toolchain) -> Result<std::process::Command, Box<dyn Error>> {
+/// The viewer built for this host. Under WSL it is a Windows program, so
+/// rendering uses the Windows GPU driver.
+struct Viewer {
+    command: std::process::Command,
+    windows: bool,
+}
+
+impl Viewer {
+    /// A path the viewer can open.
+    fn path(&self, path: &Path) -> Result<OsString, Box<dyn Error>> {
+        let path = std::path::absolute(path)?;
+        if !self.windows {
+            return Ok(path.into());
+        }
+        let out = std::process::Command::new("wslpath")
+            .arg("-w")
+            .arg(&path)
+            .output()?;
+        if !out.status.success() {
+            return Err(format!("wslpath {}: {}", path.display(), out.status).into());
+        }
+        Ok(String::from_utf8(out.stdout)?.trim_end().into())
+    }
+}
+
+/// Build the viewer for this host.
+fn viewer(t: &Toolchain) -> Result<Viewer, Box<dyn Error>> {
+    let windows = toolchain::windows_viewer();
+    let target = "x86_64-pc-windows-gnu";
     let cargo = t.cargo_bin("cargo").ok_or("cargo not found")?;
-    let status = std::process::Command::new(cargo)
-        .args(["build", "--package", "viewer"])
-        .current_dir(&t.root)
-        .status()?;
-    if !status.success() {
+    let mut build = std::process::Command::new(cargo);
+    build.args(["build", "--package", "viewer"]);
+    if windows {
+        build.args(["--target", target]);
+    }
+    if !build.current_dir(&t.root).status()?.success() {
         return Err("viewer build failed".into());
     }
-    let mut c = std::process::Command::new(t.root.join("target/debug/viewer"));
-    let icd = t.dozen_icd();
-    if toolchain::wsl_gpu() && icd.is_file() {
-        // wgpu hides dozen because it is not a conformant Vulkan driver.
-        c.env("VK_ICD_FILENAMES", icd)
-            .env("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER", "1");
+    let bin = if windows {
+        t.root.join("target").join(target).join("debug/viewer.exe")
+    } else {
+        t.root.join("target/debug/viewer")
+    };
+    let mut command = std::process::Command::new(bin);
+    if windows {
+        // The /p flag converts the path when it crosses to Windows.
+        let mut share = std::env::var_os("WSLENV").unwrap_or_default();
+        if !share.is_empty() {
+            share.push(":");
+        }
+        share.push("COLDGUARD_ASSETS/p");
+        command
+            .env("COLDGUARD_ASSETS", t.root.join("crates/viewer/assets"))
+            .env("WSLENV", share);
     }
-    Ok(c)
+    Ok(Viewer { command, windows })
 }
 
 fn records(t: &Toolchain) -> PathBuf {
@@ -207,12 +251,8 @@ fn run() -> Result<bool, Box<dyn Error>> {
             at,
             speed,
         } => {
-            let mut args: Vec<OsString> = vec![];
-            if let Some(path) = screenshot {
-                args.extend(["--screenshot".into(), std::path::absolute(path)?.into()]);
-                args.extend(at.iter().map(|s| s.to_string().into()));
-            }
-            demo(&t, &scenario, headless, !no_firmware, &args, speed).map(|()| true)
+            let shots = screenshot.map(|path| (path, at));
+            demo(&t, &scenario, headless, !no_firmware, shots, speed).map(|()| true)
         }
         Command::Records { latest } => {
             hub::export(&records(&t), latest, &mut io::stdout().lock())?;

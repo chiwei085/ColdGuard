@@ -6,7 +6,8 @@ mod simulation;
 mod world;
 
 pub use protocol::{
-    Batch, Control, Entry, Fleet, Frame, LIVE_PORT, Report, STAFF_BADGE, batch_tag,
+    Batch, Control, Entry, Fleet, Frame, LIVE_PORT, Report, STAFF_BADGE, VIDEO_FPS, VIDEO_SIZE,
+    batch_tag,
 };
 pub use scenario::{Caption, Check, Event, Scenario};
 pub use simulation::Simulation;

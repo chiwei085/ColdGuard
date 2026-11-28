@@ -48,14 +48,6 @@ impl Toolchain {
         self.tools().join("esp-emu").join(version).join("esp-emu")
     }
 
-    pub fn dozen(&self) -> PathBuf {
-        self.tools().join("dozen").join(&self.m.dozen.version)
-    }
-
-    pub fn dozen_icd(&self) -> PathBuf {
-        self.dozen().join("share/vulkan/icd.d/dzn_icd.x86_64.json")
-    }
-
     pub fn smoke_source(&self) -> PathBuf {
         self.root.join("firmware/smoke")
     }
@@ -196,9 +188,26 @@ impl Toolchain {
 }
 
 /// PATH of the calling shell.
-/// WSL exposes the GPU only through D3D12.
-pub fn wsl_gpu() -> bool {
-    Path::new("/dev/dxg").exists()
+/// The WSL version, or none outside WSL.
+pub fn wsl() -> Option<u8> {
+    wsl_version(&fs::read_to_string("/proc/sys/kernel/osrelease").ok()?)
+}
+
+fn wsl_version(kernel_release: &str) -> Option<u8> {
+    let r = kernel_release.to_ascii_lowercase();
+    let two = r.contains("microsoft-standard") || r.contains("wsl2");
+    r.contains("microsoft").then_some(if two { 2 } else { 1 })
+}
+
+/// Windows programs can be started from Linux.
+pub fn wsl_interop() -> bool {
+    fs::read_to_string("/proc/sys/fs/binfmt_misc/WSLInterop")
+        .is_ok_and(|s| s.starts_with("enabled"))
+}
+
+/// Under WSL2 the viewer runs as a Windows program to use the Windows GPU driver.
+pub fn windows_viewer() -> bool {
+    wsl() == Some(2) && wsl_interop()
 }
 
 pub fn user_path() -> impl Iterator<Item = PathBuf> {
@@ -278,6 +287,13 @@ pub fn idf_tools(idf: &Path, targets: &[String]) -> Result<Vec<(String, String)>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wsl_version_from_kernel_release() {
+        assert_eq!(wsl_version("6.18.33.2-microsoft-standard-WSL2"), Some(2));
+        assert_eq!(wsl_version("4.4.0-19041-Microsoft"), Some(1));
+        assert_eq!(wsl_version("6.8.0-45-generic"), None);
+    }
+
     use super::*;
 
     #[test]

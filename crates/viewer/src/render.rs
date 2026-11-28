@@ -1,6 +1,6 @@
-//! Offline rendering of a saved timeline to video. One update is one video
-//! frame at a fixed time step, so motion and capture never depend on how fast
-//! the host renders.
+//! Offline rendering of a saved timeline as raw frames on stdout. One update
+//! is one video frame at a fixed time step, so motion and capture never depend
+//! on how fast the host renders. The caller encodes the stream.
 
 use crate::Live;
 use bevy::{
@@ -12,13 +12,12 @@ use bevy::{
     },
     time::TimeUpdateStrategy,
 };
-use sim_core::{Entry, Frame, Scenario};
+use sim_core::{Entry, Frame, Scenario, VIDEO_FPS as FPS, VIDEO_SIZE as SIZE};
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
+    io::{self, Write},
+    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -28,8 +27,6 @@ use std::{
     time::Duration,
 };
 
-const FPS: u32 = 60;
-const SIZE: (u32, u32) = (1920, 1080);
 /// Frames drawn at time zero to settle the camera and the TAA history.
 const WARMUP: u32 = 90;
 
@@ -44,16 +41,16 @@ struct Film {
     end_ms: f64,
     warmup: u32,
     taken: u64,
-    /// Shared with pending captures so closing it ends the encoder.
+    /// Shared with pending captures so closing it ends the writer.
     tx: Arc<Mutex<Option<SyncSender<(u64, Image)>>>>,
     written: Arc<AtomicU64>,
     writer: Option<JoinHandle<Result<(), String>>>,
 }
 
-/// Arguments are the timeline, the scenario for captions and the output file.
+/// Arguments are the timeline and the scenario for captions.
 pub fn start(app: &mut App, args: &[String]) -> Result<(), String> {
-    let [timeline, scenario, out] = args else {
-        return Err("usage: viewer --render TIMELINE SCENARIO OUT".into());
+    let [timeline, scenario] = args else {
+        return Err("usage: viewer --render TIMELINE SCENARIO > FRAMES".into());
     };
     let (frames, events) = load(Path::new(timeline))?;
     let text = fs::read_to_string(scenario).map_err(|e| format!("{scenario}: {e}"))?;
@@ -67,7 +64,7 @@ pub fn start(app: &mut App, args: &[String]) -> Result<(), String> {
     // Bounded so a slow encoder slows rendering instead of filling memory.
     let (tx, rx) = sync_channel(16);
     let written = Arc::new(AtomicU64::new(0));
-    let (out, count) = (PathBuf::from(out), written.clone());
+    let count = written.clone();
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
         1.0 / f64::from(FPS),
     )))
@@ -82,7 +79,7 @@ pub fn start(app: &mut App, args: &[String]) -> Result<(), String> {
         taken: 0,
         tx: Arc::new(Mutex::new(Some(tx))),
         written,
-        writer: Some(spawn(move || encode(&out, &rx, &count))),
+        writer: Some(spawn(move || write_frames(&rx, &count))),
     })
     .add_systems(Update, (aim, hide_controls))
     .add_systems(PreUpdate, play.after(crate::receive));
@@ -207,7 +204,7 @@ fn play(
         }
         return;
     }
-    // Every capture must reach the encoder before it closes.
+    // Every capture must be written before stdout closes.
     if film.written.load(Ordering::Relaxed) < film.taken {
         return;
     }
@@ -215,11 +212,11 @@ fn play(
     let result = film.writer.take().map(JoinHandle::join);
     match result {
         Some(Ok(Ok(()))) => {
-            info!("Video saved, {} frames", film.taken);
+            info!("Rendered {} frames", film.taken);
             exit.write(AppExit::Success);
         }
         Some(Ok(Err(e))) => {
-            error!("Video failed: {e}");
+            error!("Render failed: {e}");
             exit.write(AppExit::error());
         }
         _ => {
@@ -228,34 +225,9 @@ fn play(
     }
 }
 
-/// Writes frames in order to ffmpeg, then checks the finished file.
-fn encode(out: &Path, shots: &Receiver<(u64, Image)>, written: &AtomicU64) -> Result<(), String> {
-    let part = out.with_extension("part.mp4");
-    let mut ffmpeg = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-        ])
-        .args(["-s", &format!("{}x{}", SIZE.0, SIZE.1)])
-        .args(["-framerate", &FPS.to_string(), "-i", "-"])
-        .args([
-            "-vf",
-            "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
-        ])
-        .args(["-c:v", "libx264", "-preset", "slow", "-crf", "17"])
-        .args(["-colorspace", "bt709", "-color_primaries", "bt709"])
-        .args(["-color_trc", "bt709", "-color_range", "tv"])
-        .args(["-movflags", "+faststart"])
-        .arg(&part)
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("ffmpeg: {e}"))?;
-    let mut stdin = ffmpeg.stdin.take().ok_or("ffmpeg input closed")?;
+/// Writes frames to stdout in capture order.
+fn write_frames(shots: &Receiver<(u64, Image)>, written: &AtomicU64) -> Result<(), String> {
+    let mut out = io::stdout().lock();
     let mut early = BTreeMap::new();
     let mut next = 0;
     for (index, image) in shots {
@@ -265,25 +237,10 @@ fn encode(out: &Path, shots: &Receiver<(u64, Image)>, written: &AtomicU64) -> Re
             if data.len() != (SIZE.0 * SIZE.1 * 4) as usize {
                 return Err(format!("frame {next} has {} bytes", data.len()));
             }
-            stdin.write_all(data).map_err(|e| format!("ffmpeg: {e}"))?;
+            out.write_all(data).map_err(|e| format!("stdout: {e}"))?;
             next += 1;
             written.store(next, Ordering::Relaxed);
         }
     }
-    drop(stdin);
-    let status = ffmpeg.wait().map_err(|e| format!("ffmpeg: {e}"))?;
-    if !status.success() {
-        return Err(format!("ffmpeg {status}"));
-    }
-    let probe = Command::new("ffprobe")
-        .args(["-v", "error", "-count_packets", "-select_streams", "v:0"])
-        .args(["-show_entries", "stream=nb_read_packets", "-of", "csv=p=0"])
-        .arg(&part)
-        .output()
-        .map_err(|e| format!("ffprobe: {e}"))?;
-    let decoded = String::from_utf8_lossy(&probe.stdout).trim().to_string();
-    if decoded != next.to_string() {
-        return Err(format!("wrote {next} frames, decoded {decoded}"));
-    }
-    fs::rename(&part, out).map_err(|e| format!("{}: {e}", out.display()))
+    out.flush().map_err(|e| format!("stdout: {e}"))
 }

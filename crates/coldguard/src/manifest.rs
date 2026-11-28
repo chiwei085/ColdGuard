@@ -9,7 +9,7 @@ pub struct Manifest {
     pub python: Python,
     pub esp_idf: EspIdf,
     pub esp_emu: EspEmu,
-    pub dozen: Dozen,
+    pub wsl: Wsl,
     pub mqtt: Mqtt,
     pub apt: BTreeMap<String, String>,
 }
@@ -56,11 +56,7 @@ pub struct EspEmu {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Dozen {
-    pub version: String,
-    pub url: String,
-    pub archive_sha256: String,
-    pub python: Vec<String>,
+pub struct Wsl {
     pub apt: Vec<String>,
 }
 
@@ -88,7 +84,5 @@ mod tests {
         assert!(hex(&m.esp_emu.binary_sha256, 64));
         assert!(m.esp_idf.url.starts_with("https://"));
         assert!(m.esp_emu.url.contains(&m.esp_emu.version));
-        assert!(hex(&m.dozen.archive_sha256, 64));
-        assert!(m.dozen.url.contains(&m.dozen.version));
     }
 }
