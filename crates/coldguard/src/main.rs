@@ -169,18 +169,18 @@ impl Viewer {
 /// Build the viewer for this host.
 fn viewer(t: &Toolchain) -> Result<Viewer, Box<dyn Error>> {
     let windows = toolchain::windows_viewer();
-    let target = "x86_64-pc-windows-gnu";
     let cargo = t.cargo_bin("cargo").ok_or("cargo not found")?;
     let mut build = std::process::Command::new(cargo);
     build.args(["build", "--package", "viewer"]);
     if windows {
-        build.args(["--target", target]);
+        build.args(["--target", toolchain::WINDOWS_TARGET]);
     }
     if !build.current_dir(&t.root).status()?.success() {
         return Err("viewer build failed".into());
     }
     let bin = if windows {
-        t.root.join("target").join(target).join("debug/viewer.exe")
+        let target = t.root.join("target").join(toolchain::WINDOWS_TARGET);
+        target.join("debug/viewer.exe")
     } else {
         t.root.join("target/debug/viewer")
     };
