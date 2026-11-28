@@ -9,7 +9,7 @@
 
 | 項目 | 選擇 |
 |---|---|
-| 開發與執行環境 | Linux（Ubuntu 24.04） |
+| 開發與執行環境 | Linux x86_64：Ubuntu 22.04、24.04、26.04，Debian 12、13（CI 逐一驗證）；WSL 以 dozen 使用 GPU |
 | 韌體 | ESP-IDF、C、FreeRTOS |
 | 目標晶片 | ESP32-S3（效能不足時改用 ESP32-C3） |
 | 晶片模擬 | [esp-emu](https://github.com/espressif/esp-emulator) 1.2.0 |
@@ -26,6 +26,15 @@ cargo run -- doctor                # 檢查環境；缺少系統套件時會列�
 cargo run -- setup                 # 安裝工具、建置 smoke 韌體，再執行 doctor
 cargo run -- exec idf.py --version # 在專案環境中執行指令
 ```
+
+在乾淨容器重現單一發行版的 CI（安裝 apt 套件、rustup、uv，再跑 setup 與測試，驗收不在 CI 內）：
+
+```sh
+git worktree add ../coldguard-ci   # 容器以 root 寫入 .tools 與 target，用獨立 worktree 避免污染工作目錄
+docker run --rm -v "$PWD/../coldguard-ci:/work" -w /work debian:12 scripts/ci
+```
+
+支援的發行版列於 `toolchain.toml` 的 `host.os`，CI 依此清單建立矩陣。WSL 上 `setup` 會另外建置 Mesa 的 dozen（Vulkan on D3D12），讓 viewer 與 `video` 使用 GPU 而非 llvmpipe。
 
 使用 mise 的人也直接執行 `cargo run`：專案的 `mise.toml` 會讓 mise 採用 `rust-toolchain.toml` 的版本。
 

@@ -197,7 +197,7 @@ fn play(
             });
         film.taken += 1;
         film.sim_ms = film.advance(film.sim_ms, 1000.0 / f64::from(FPS));
-        if film.taken % (u64::from(FPS) * 10) == 0 {
+        if film.taken.is_multiple_of(u64::from(FPS) * 10) {
             info!(
                 "Rendered {} s of video, {:.0} / {:.0} s simulated",
                 film.taken / u64::from(FPS),

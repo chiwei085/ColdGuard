@@ -1,6 +1,6 @@
 [package]
 name = "viewer"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
@@ -10,3 +10,7 @@ publish = false
 bevy = { version = "0.20", default-features = false, features = ["std", "bevy_winit", "default_font", "multi_threaded", "x11", "default_app", "3d_bevy_render", "ui_api", "ui_bevy_render", "bevy_ui_widgets", "picking", "png", "area_light_luts", "experimental_pbr_pcss"] }
 serde_json = "1"
 sim-core = { path = "../sim-core" }
+
+[lints.clippy]
+# Bevy system parameters are nested query types by design.
+type_complexity = "allow"

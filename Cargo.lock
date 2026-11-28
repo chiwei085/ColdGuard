@@ -1974,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "coldguard"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "rumqttc",
@@ -4361,7 +4361,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sim-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4943,7 +4943,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "viewer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bevy",
  "serde_json",
