@@ -121,9 +121,7 @@ fn demo(
         return live::serve(scenario, units, speed, || false);
     }
     // Build first so the server never waits for the compiler.
-    let mut viewer = std::process::Command::new(viewer(t)?)
-        .args(viewer_args)
-        .spawn()?;
+    let mut viewer = viewer(t)?.args(viewer_args).spawn()?;
     let result = live::serve(scenario, units, speed, || {
         !matches!(viewer.try_wait(), Ok(None))
     });
@@ -137,8 +135,8 @@ fn demo(
         .ok_or_else(|| format!("viewer {status}").into())
 }
 
-/// Build the viewer and return its path.
-fn viewer(t: &Toolchain) -> Result<PathBuf, Box<dyn Error>> {
+/// Build the viewer and return a command that runs it on the GPU.
+fn viewer(t: &Toolchain) -> Result<std::process::Command, Box<dyn Error>> {
     let cargo = t.cargo_bin("cargo").ok_or("cargo not found")?;
     let status = std::process::Command::new(cargo)
         .args(["build", "--package", "viewer"])
@@ -147,7 +145,14 @@ fn viewer(t: &Toolchain) -> Result<PathBuf, Box<dyn Error>> {
     if !status.success() {
         return Err("viewer build failed".into());
     }
-    Ok(t.root.join("target/debug/viewer"))
+    let mut c = std::process::Command::new(t.root.join("target/debug/viewer"));
+    let icd = t.dozen_icd();
+    if toolchain::wsl_gpu() && icd.is_file() {
+        // wgpu hides dozen because it is not a conformant Vulkan driver.
+        c.env("VK_ICD_FILENAMES", icd)
+            .env("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER", "1");
+    }
+    Ok(c)
 }
 
 fn records(t: &Toolchain) -> PathBuf {

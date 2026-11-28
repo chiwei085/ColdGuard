@@ -2,7 +2,7 @@
 
 use crate::{
     smoke,
-    toolchain::{Toolchain, check_venv, find_in, idf_tools, user_path},
+    toolchain::{Toolchain, check_venv, find_in, idf_tools, user_path, wsl_gpu},
 };
 use serde::Serialize;
 use std::{
@@ -48,6 +48,7 @@ pub fn run(t: &Toolchain) -> Vec<Check> {
     d.python();
     d.esp_idf();
     d.esp_emu();
+    d.dozen();
     d.layer = "Isolation";
     d.isolation();
     d.layer = "Runtime";
@@ -119,13 +120,12 @@ impl Doctor<'_> {
                 .trim_matches('"')
                 .to_string()
         };
-        let (id, version) = (field("ID"), field("VERSION_ID"));
-        let status = ok_or(id == h.os_id && version == h.os_version, Status::Fail);
+        let os = format!("{} {}", field("ID"), field("VERSION_ID"));
         self.add(
             "Operating system",
-            status,
-            format!("{id} {version}"),
-            Some(format!("Use {} {}", h.os_id, h.os_version)),
+            ok_or(h.os.contains(&os), Status::Fail),
+            &os,
+            Some(format!("Use one of: {}", h.os.join(", "))),
         );
         self.add(
             "Architecture",
@@ -183,8 +183,13 @@ impl Doctor<'_> {
     }
 
     fn apt(&mut self) {
+        let mut want = self.t.m.apt.clone();
+        if wsl_gpu() {
+            let dozen = &self.t.m.dozen.apt;
+            want.extend(dozen.iter().map(|p| (p.clone(), String::new())));
+        }
         let mut args = vec!["-W", "-f", "${Package}\t${db:Status-Status}\t${Version}\n"];
-        args.extend(self.t.m.apt.keys().map(String::as_str));
+        args.extend(want.keys().map(String::as_str));
         // Exit 1 means unknown packages. stdout is still valid.
         let out = match self.t.command(Path::new("dpkg-query")).args(&args).output() {
             Ok(o) if matches!(o.status.code(), Some(0 | 1)) => o,
@@ -199,10 +204,7 @@ impl Doctor<'_> {
             Err(e) => return self.add("System packages", Status::Fail, e.to_string(), None),
         };
         let installed = parse_dpkg(&String::from_utf8_lossy(&out.stdout));
-        let bad: Vec<String> = self
-            .t
-            .m
-            .apt
+        let bad: Vec<String> = want
             .iter()
             .filter(|(name, min)| match installed.get(*name) {
                 None => true,
@@ -212,7 +214,7 @@ impl Doctor<'_> {
             .map(|(name, _)| name.clone())
             .collect();
         if bad.is_empty() {
-            let n = self.t.m.apt.len();
+            let n = want.len();
             self.add(
                 "System packages",
                 Status::Ok,
@@ -399,6 +401,27 @@ impl Doctor<'_> {
             ok_or(good, Status::Fail),
             got.unwrap_or_else(|e| e),
             fix,
+        );
+    }
+
+    fn dozen(&mut self) {
+        if !wsl_gpu() {
+            return;
+        }
+        let icd = self.t.dozen_icd();
+        let good = icd.is_file();
+        self.add(
+            "dozen",
+            ok_or(good, Status::Warn),
+            if good {
+                format!("Mesa {} Vulkan on D3D12", self.t.m.dozen.version)
+            } else {
+                format!(
+                    "{} does not exist. The viewer renders on the CPU",
+                    icd.display()
+                )
+            },
+            setup_fix(),
         );
     }
 

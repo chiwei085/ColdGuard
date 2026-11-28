@@ -1,8 +1,8 @@
 # Expected environment. See Cargo.toml for the minimum Rust version.
 
 [host]
-os_id = "ubuntu"
-os_version = "24.04"
+# ID and VERSION_ID from /etc/os-release. CI builds and accepts each one.
+os = ["ubuntu 22.04", "ubuntu 24.04", "ubuntu 26.04", "debian 12", "debian 13"]
 arch = "x86_64"
 min_free_disk_gib = 20
 recommended_memory_gib = 8
@@ -27,6 +27,29 @@ version = "1.2.0"
 url = "https://github.com/espressif/esp-emulator/releases/download/v1.2.0/esp-emu-1.2.0-x86_64-unknown-linux-gnu.tar.gz"
 archive_sha256 = "560236344fd69dc8d74bc862c79aea01f7a69ac626ae3f54b1b0946bbce078c1"
 binary_sha256 = "fe6b910f921772eed06969b57db02903c5f404a2f2a11dee116a857d4cdc3a2f"
+
+[dozen]
+# Mesa Vulkan driver on D3D12. WSL has no other Vulkan driver for the GPU,
+# so the viewer renders on the CPU without it. Built only when /dev/dxg exists.
+version = "25.2.8"
+url = "https://archive.mesa3d.org/mesa-25.2.8.tar.xz"
+archive_sha256 = "097842f3e49d996868b38688db87b006f7d4541e93ce86d2f341d8b3e7be7c93"
+# Build tools run through uv.
+python = ["meson==1.8.1", "mako==1.4.3", "pyyaml==6.0.4", "packaging==26.4"]
+# Required only on WSL.
+apt = [
+    "libx11-xcb-dev",
+    "libxcb-dri3-dev",
+    "libxcb-keysyms1-dev",
+    "libxcb-present-dev",
+    "libxcb-randr0-dev",
+    "libxcb-shm0-dev",
+    "libxcb-sync-dev",
+    "libxcb-xfixes0-dev",
+    "libxrandr-dev",
+    "libxshmfence-dev",
+    "pkg-config",
+]
 
 [mqtt]
 port = 1884

@@ -48,6 +48,14 @@ impl Toolchain {
         self.tools().join("esp-emu").join(version).join("esp-emu")
     }
 
+    pub fn dozen(&self) -> PathBuf {
+        self.tools().join("dozen").join(&self.m.dozen.version)
+    }
+
+    pub fn dozen_icd(&self) -> PathBuf {
+        self.dozen().join("share/vulkan/icd.d/dzn_icd.x86_64.json")
+    }
+
     pub fn smoke_source(&self) -> PathBuf {
         self.root.join("firmware/smoke")
     }
@@ -188,6 +196,11 @@ impl Toolchain {
 }
 
 /// PATH of the calling shell.
+/// WSL exposes the GPU only through D3D12.
+pub fn wsl_gpu() -> bool {
+    Path::new("/dev/dxg").exists()
+}
+
 pub fn user_path() -> impl Iterator<Item = PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     env::split_paths(&path).collect::<Vec<_>>().into_iter()

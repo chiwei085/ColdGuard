@@ -1,6 +1,6 @@
 //! Idempotent installation into .tools.
 
-use crate::toolchain::{Toolchain, find_in, user_path};
+use crate::toolchain::{Toolchain, find_in, user_path, wsl_gpu};
 use std::{error::Error, fs, path::Path, process::Command};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -20,6 +20,9 @@ pub fn run(t: &Toolchain) -> Result {
     step("ESP-IDF toolchain", idf_tools(t))?;
     step("esp-emu", esp_emu(t))?;
     step("Cargo dependencies", cargo(t))?;
+    if wsl_gpu() {
+        step("dozen", dozen(t))?;
+    }
     step("Smoke firmware", smoke(t))?;
     step("Node firmware", node(t))
 }
@@ -78,15 +81,17 @@ fn esp_idf(t: &Toolchain) -> Result {
     )
 }
 
+/// uv with project-local Python installs.
+fn uv(t: &Toolchain) -> Result<Command> {
+    let uv = find_in(user_path(), "uv").ok_or("uv not found (https://docs.astral.sh/uv/)")?;
+    let mut c = t.plain(uv);
+    c.env("UV_PYTHON_INSTALL_DIR", t.tools().join("python"))
+        .current_dir(t.tools());
+    Ok(c)
+}
+
 fn python(t: &Toolchain) -> Result {
     let want = &t.m.python;
-    let uv = find_in(user_path(), "uv").ok_or("uv not found (https://docs.astral.sh/uv/)")?;
-    let uv = || {
-        let mut c = t.plain(&uv);
-        c.env("UV_PYTHON_INSTALL_DIR", t.tools().join("python"))
-            .current_dir(t.tools());
-        c
-    };
     let minor =
         t.m.esp_idf
             .version
@@ -105,7 +110,8 @@ fn python(t: &Toolchain) -> Result {
     }
     // idf.py checks the constraints. uv.lock holds the versions.
     check(
-        uv().env("UV_PROJECT_ENVIRONMENT", t.venv())
+        uv(t)?
+            .env("UV_PROJECT_ENVIRONMENT", t.venv())
             .args([
                 "sync",
                 "--locked",
@@ -151,6 +157,74 @@ fn esp_emu(t: &Toolchain) -> Result {
     t.verify(&tmp.join("esp-emu"), &want.binary_sha256)?;
     fs::create_dir_all(bin.parent().ok_or("Invalid esp-emu path")?)?;
     fs::rename(tmp.join("esp-emu"), &bin)?;
+    fs::remove_dir_all(&tmp)?;
+    Ok(())
+}
+
+/// Builds only the Mesa dozen driver. Its ICD file marks a finished build.
+fn dozen(t: &Toolchain) -> Result {
+    let want = &t.m.dozen;
+    let icd = t.dozen_icd();
+    if icd.is_file() {
+        return Ok(());
+    }
+    let tmp = t.tools().join("dozen.tmp");
+    if tmp.exists() {
+        fs::remove_dir_all(&tmp)?;
+    }
+    let (src, build) = (tmp.join("src"), tmp.join("build"));
+    fs::create_dir_all(&src)?;
+    let archive = tmp.join("mesa.tar.xz");
+    download(t, &want.url, &archive)?;
+    t.verify(&archive, &want.archive_sha256)?;
+    check(
+        t.plain("tar")
+            .args(["--strip-components=1", "--no-same-owner", "-xJf"])
+            .arg(&archive)
+            .arg("-C")
+            .arg(&src),
+    )?;
+    let meson = || -> Result<Command> {
+        let mut c = uv(t)?;
+        c.args(["tool", "run", "--managed-python", "--python"])
+            .arg(&t.m.python.version);
+        let (tool, with) = want.python.split_first().ok_or("dozen.python is empty")?;
+        c.args(["--from", tool]);
+        for package in with {
+            c.args(["--with", package]);
+        }
+        c.arg("meson");
+        Ok(c)
+    };
+    check(
+        meson()?
+            .arg("setup")
+            .arg(&build)
+            .arg(&src)
+            .arg(format!("-Dprefix={}", t.dozen().display()))
+            .args([
+                "-Dbuildtype=release",
+                "-Dvulkan-drivers=microsoft-experimental",
+                "-Dgallium-drivers=",
+                "-Dplatforms=x11",
+                "-Dopengl=false",
+                "-Dglx=disabled",
+                "-Degl=disabled",
+                "-Dgbm=disabled",
+                "-Dgles1=disabled",
+                "-Dgles2=disabled",
+                "-Dllvm=disabled",
+                "-Dvalgrind=disabled",
+                "-Dlibunwind=disabled",
+                "-Dzstd=disabled",
+                // Mesa's bundled libdrm avoids requiring libdrm-dev.
+                "-Dallow-fallback-for=libdrm",
+            ]),
+    )?;
+    check(meson()?.args(["install", "--quiet", "-C"]).arg(&build))?;
+    if !icd.is_file() {
+        return Err(format!("{} was not installed", icd.display()).into());
+    }
     fs::remove_dir_all(&tmp)?;
     Ok(())
 }

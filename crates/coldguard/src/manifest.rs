@@ -9,6 +9,7 @@ pub struct Manifest {
     pub python: Python,
     pub esp_idf: EspIdf,
     pub esp_emu: EspEmu,
+    pub dozen: Dozen,
     pub mqtt: Mqtt,
     pub apt: BTreeMap<String, String>,
 }
@@ -16,8 +17,7 @@ pub struct Manifest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Host {
-    pub os_id: String,
-    pub os_version: String,
+    pub os: Vec<String>,
     pub arch: String,
     pub min_free_disk_gib: u64,
     pub recommended_memory_gib: u64,
@@ -56,6 +56,16 @@ pub struct EspEmu {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Dozen {
+    pub version: String,
+    pub url: String,
+    pub archive_sha256: String,
+    pub python: Vec<String>,
+    pub apt: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Mqtt {
     pub port: u16,
 }
@@ -78,5 +88,7 @@ mod tests {
         assert!(hex(&m.esp_emu.binary_sha256, 64));
         assert!(m.esp_idf.url.starts_with("https://"));
         assert!(m.esp_emu.url.contains(&m.esp_emu.version));
+        assert!(hex(&m.dozen.archive_sha256, 64));
+        assert!(m.dozen.url.contains(&m.dozen.version));
     }
 }

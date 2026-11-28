@@ -24,7 +24,6 @@ pub fn run(
 ) -> Result<(), Box<dyn Error>> {
     let dir = t.tools().join("film");
     fs::create_dir_all(&dir)?;
-    let viewer = crate::viewer(t)?;
     let mut parts = vec![];
     for scenario in scenarios {
         let name = scenario.file_stem().unwrap_or_default().to_string_lossy();
@@ -39,7 +38,8 @@ pub fn run(
             .into());
         }
         let part = dir.join(format!("{name}.mp4"));
-        let status = Command::new(&viewer)
+        // A no-op build after the first part.
+        let status = crate::viewer(t)?
             .arg("--render")
             .args([&timeline, &std::path::absolute(scenario)?, &part])
             .status()?;
